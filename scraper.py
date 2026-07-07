@@ -1,45 +1,48 @@
 import requests
-import pandas as pd
+from datetime import datetime, timedelta
 
 def get_taifex_institutional_oi():
-    url = 'https://www.taifex.com.tw/cht/3/futContractsDate'
-    
-    # 秘訣 1：日期留白。期交所會自動回傳「最新一個交易日」的資料，避免遇到假日或盤中無資料
-    payload = {
-        'queryType': '1',
-        'goDay': '',
-        'doQuery': '1',
-        'dateaddcnt': '',
-        'queryDate': '', 
-        'commodityId': 'TXF' 
-    }
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
-    }
-    
+    """
+    使用 FinMind API 獲取期交所三大法人未平倉。
+    優點：回傳乾淨的 JSON 格式，且不會封鎖 Streamlit 雲端主機的 IP。
+    """
     try:
-        res = requests.post(url, data=payload, headers=headers, timeout=10)
-        dfs = pd.read_html(res.text)
+        # 抓取過去 10 天的資料，確保即使遇到長假也能拿到「最新一個交易日」的數據
+        start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesInstitutionalInvestors&data_id=TXF&start_date={start_date}"
         
-        # 確認是否有抓到足夠的表格
-        if len(dfs) < 3:
-            return {"外資": 0, "投信": 0, "自營商": 0, "error": "找不到期交所表格，可能網頁結構已改變"}
+        # 發送 API 請求
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        
+        # 檢查 API 狀態
+        if data.get('status') != 200 or not data.get('data'):
+            return {"外資": 0, "投信": 0, "自營商": 0, "error": "FinMind API 無資料"}
             
-        df = dfs[2] # 期交所的資料通常在第 3 個表格
+        df = data['data']
         
-        # 秘訣 2：強制轉為字串並清除所有逗號與空白，避免 int() 轉換報錯
-        foreign_oi = str(df.iloc[5, 13]).replace(',', '').replace(' ', '')
-        trust_oi = str(df.iloc[4, 13]).replace(',', '').replace(' ', '')
-        dealer_oi = str(df.iloc[3, 13]).replace(',', '').replace(' ', '')
+        # 取得資料陣列中「最後一筆」的日期，這就是最新的交易日
+        latest_date = df[-1]['date']
         
-        return {
-            "外資": int(foreign_oi),
-            "投信": int(trust_oi),
-            "自營商": int(dealer_oi),
-            "error": None # 成功時 error 為 None
-        }
+        # 過濾出該日期的所有法人數據
+        latest_data = [item for item in df if item['date'] == latest_date]
+        
+        oi_dict = {"外資": 0, "投信": 0, "自營商": 0}
+        
+        # 將對應的未平倉淨額塞入字典
+        for item in latest_data:
+            name = item.get('name', '')
+            net_volume = item.get('open_interest_net_volume', 0)
+            
+            if '外資' in name:
+                oi_dict['外資'] = net_volume
+            elif '投信' in name:
+                oi_dict['投信'] = net_volume
+            elif '自營' in name:
+                oi_dict['自營商'] = net_volume
+                
+        oi_dict['error'] = None
+        return oi_dict
+        
     except Exception as e:
-        # 秘訣 3：把真實的錯誤原因傳送出去！
-        return {"外資": 0, "投信": 0, "自營商": 0, "error": f"爬蟲報錯: {str(e)}"}
-
+        return {"外資": 0, "投信": 0, "自營商": 0, "error": f"API 連線錯誤: {str(e)}"}
