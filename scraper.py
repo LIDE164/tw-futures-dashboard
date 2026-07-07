@@ -42,3 +42,4 @@ def get_taifex_institutional_oi():
     except Exception as e:
         # 秘訣 3：把真實的錯誤原因傳送出去！
         return {"外資": 0, "投信": 0, "自營商": 0, "error": f"爬蟲報錯: {str(e)}"}
+
