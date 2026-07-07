@@ -1,41 +1,44 @@
 import requests
 import pandas as pd
-from datetime import datetime
 
 def get_taifex_institutional_oi():
     url = 'https://www.taifex.com.tw/cht/3/futContractsDate'
+    
+    # 秘訣 1：日期留白。期交所會自動回傳「最新一個交易日」的資料，避免遇到假日或盤中無資料
     payload = {
         'queryType': '1',
         'goDay': '',
         'doQuery': '1',
         'dateaddcnt': '',
-        'queryDate': datetime.now().strftime('%Y/%m/%d'), 
+        'queryDate': '', 
         'commodityId': 'TXF' 
     }
     
-    # 加入 Headers，偽裝成一般電腦的 Chrome 瀏覽器
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
     }
     
     try:
-        # 發送請求時帶上 headers
-        res = requests.post(url, data=payload, headers=headers)
+        res = requests.post(url, data=payload, headers=headers, timeout=10)
+        dfs = pd.read_html(res.text)
         
-        # 使用 match 參數，直接尋找包含特定文字的表格，比直接指定 dfs[2] 更不容易因為網頁改版而報錯
-        dfs = pd.read_html(res.text, match='多空淨額')
-        df = dfs[0] 
+        # 確認是否有抓到足夠的表格
+        if len(dfs) < 3:
+            return {"外資": 0, "投信": 0, "自營商": 0, "error": "找不到期交所表格，可能網頁結構已改變"}
+            
+        df = dfs[2] # 期交所的資料通常在第 3 個表格
         
-        # 依照期交所目前最新的欄位結構抓取 (依實際情況可能需要微調索引)
-        foreign_oi = df.iloc[5, 13]  
-        trust_oi = df.iloc[4, 13]    
-        dealer_oi = df.iloc[3, 13]   
+        # 秘訣 2：強制轉為字串並清除所有逗號與空白，避免 int() 轉換報錯
+        foreign_oi = str(df.iloc[5, 13]).replace(',', '').replace(' ', '')
+        trust_oi = str(df.iloc[4, 13]).replace(',', '').replace(' ', '')
+        dealer_oi = str(df.iloc[3, 13]).replace(',', '').replace(' ', '')
         
         return {
-            "外資": int(str(foreign_oi).replace(',', '')),
-            "投信": int(str(trust_oi).replace(',', '')),
-            "自營商": int(str(dealer_oi).replace(',', ''))
+            "外資": int(foreign_oi),
+            "投信": int(trust_oi),
+            "自營商": int(dealer_oi),
+            "error": None # 成功時 error 為 None
         }
     except Exception as e:
-        print(f"爬取失敗: {e}")
-        return {"外資": 0, "投信": 0, "自營商": 0}
+        # 秘訣 3：把真實的錯誤原因傳送出去！
+        return {"外資": 0, "投信": 0, "自營商": 0, "error": f"爬蟲報錯: {str(e)}"}
