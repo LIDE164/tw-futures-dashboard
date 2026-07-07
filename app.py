@@ -16,12 +16,19 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # 2. 抓取真實數據 (這裡會呼叫你寫好的爬蟲與 API)
+# 2. 抓取真實數據 (這裡會呼叫你寫好的爬蟲與 API)
 try:
     oi_data = get_taifex_institutional_oi()
+    
+    # ★ 新增：如果爬蟲有回傳錯誤，直接在網頁最上方印出紅色警告框 ★
+    if oi_data.get("error"):
+        st.error(f"⚠️ 法人籌碼抓取失敗原因：{oi_data['error']}")
+        
     realtime = get_realtime_data()
-except:
-    # 若爬蟲暫時失敗，給予預設值以防畫面崩潰
-    oi_data = {"外資": 12500, "投信": 1200, "自營商": -3500}
+except Exception as e:
+    # 這是最外層的防線
+    st.error(f"系統發生未預期錯誤：{str(e)}")
+    oi_data = {"外資": 0, "投信": 0, "自營商": 0, "error": None}
     realtime = {"current_price": 23150, "volume": 450000, "vwap": 23110, "vix": 18.5}
 
 # 3. 模擬技術指標並計算決策分數
