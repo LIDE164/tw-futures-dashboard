@@ -1,3 +1,5 @@
+# 檔案名稱：strategy.py
+
 class StrategyManager:
     def __init__(self):
         # 0: 空手, 1: 持有多單, -1: 持有空單
@@ -5,10 +7,6 @@ class StrategyManager:
         self.entry_price = 0
 
     def get_trade_action(self, current_score, current_price):
-        """
-        部位狀態機管理員：判斷具體的【進場時間點】與【平倉/停損點】。
-        包含 50 點固定無情停損的最高風控保險。
-        """
         action = "HOLD"
         reason = "目前無新訊號，維持既有留倉狀態。"
 
@@ -47,7 +45,7 @@ class StrategyManager:
 
         # 狀態三：目前【持有空單】，尋找出場斷點
         elif self.position == -1:
-            profit = self.entry_price - current_price  # 空單損益計算
+            profit = self.entry_price - current_price 
             
             # 🛡️ 優先級 1：絕對風控線 (被軋空達 50 點無條件砍單)
             if profit <= -50:
