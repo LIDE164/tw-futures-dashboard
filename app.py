@@ -100,4 +100,3 @@ with tab_options:
     
     st.divider()
     st.metric(label="台指 VIX 恐慌指數", value=realtime['vix'], delta="結構穩定", delta_color="off")
-    
