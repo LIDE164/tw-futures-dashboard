@@ -1,5 +1,3 @@
-# 檔案名稱：strategy.py
-
 class StrategyManager:
     def __init__(self):
         # 0: 空手, 1: 持有多單, -1: 持有空單
