@@ -1,0 +1,69 @@
+# 檔案名稱：strategy.py
+
+class StrategyManager:
+    def __init__(self):
+        # 0: 空手, 1: 持有多單, -1: 持有空單
+        self.position = 0 
+        self.entry_price = 0
+
+    def get_trade_action(self, current_score, current_price):
+        """
+        輸入最新的分數與價格，輸出當下該做的動作：
+        [BUY_LONG(做多), SELL_SHORT(放空), CLOSE_LONG(多單平倉), CLOSE_SHORT(空單平倉), HOLD(等待)]
+        """
+        action = "HOLD"
+        reason = ""
+
+        # ==========================================
+        # 狀態一：目前【空手】，尋找進場點
+        # ==========================================
+        if self.position == 0:
+            if current_score >= 60:
+                self.position = 1
+                self.entry_price = current_price
+                action = "BUY_LONG"
+                reason = f"分數達 {current_score} 分 (強勢買進)，觸發做多進場！進場價：{current_price}"
+                
+            elif current_score <= 40: 
+                self.position = -1
+                self.entry_price = current_price
+                action = "SELL_SHORT"
+                reason = f"分數跌至 {current_score} 分 (弱勢)，觸發放空進場！進場價：{current_price}"
+
+        # ==========================================
+        # 狀態二：目前【持有多單】，尋找平倉/停損點
+        # ==========================================
+        elif self.position == 1:
+            profit = current_price - self.entry_price
+            
+            # 🛡️ 絕對防守線：不管分數多少，虧損達 50 點立刻無情砍單
+            if profit <= -50:
+                self.position = 0
+                action = "CLOSE_LONG"
+                reason = f"🛑 【強制停損】帳面虧損達 {profit:+.0f} 點，無條件多單平倉！"
+            
+            # 📉 次要防守線：沒有觸發 50 點停損，但系統判斷動能轉弱
+            elif current_score < 45:
+                self.position = 0
+                action = "CLOSE_LONG"
+                reason = f"📉 分數降至 {current_score} 分 (轉弱)，多單平倉結算 (損益: {profit:+.0f} 點)。"
+
+        # ==========================================
+        # 狀態三：目前【持有空單】，尋找平倉/停損點
+        # ==========================================
+        elif self.position == -1:
+            profit = self.entry_price - current_price # 空單的獲利算法相反
+            
+            # 🛡️ 絕對防守線：不管分數多少，被軋空達 50 點立刻無情砍單
+            if profit <= -50:
+                self.position = 0
+                action = "CLOSE_SHORT"
+                reason = f"🛑 【強制停損】帳面虧損達 {profit:+.0f} 點，無條件空單平倉！"
+                
+            # 📈 次要防守線：沒有觸發 50 點停損，但系統判斷動能轉強
+            elif current_score > 45:
+                self.position = 0
+                action = "CLOSE_SHORT"
+                reason = f"📈 分數回升至 {current_score} 分 (轉強)，空單平倉結算 (損益: {profit:+.0f} 點)。"
+
+        return action, reason
