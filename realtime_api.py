@@ -1,4 +1,7 @@
-from sinopac_api import DEFAULT_FUTURES_ROOT, get_api, get_realtime_data_from_sinopac, get_simulation_default
+import sinopac_api
+
+
+DEFAULT_FUTURES_ROOT = getattr(sinopac_api, "DEFAULT_FUTURES_ROOT", "TMF")
 
 
 DEFAULT_MARKET_DATA = {
@@ -16,12 +19,15 @@ DEFAULT_MARKET_DATA = {
 
 def get_realtime_data(api=None, simulation=None, product_root=DEFAULT_FUTURES_ROOT):
     if api is None:
-        api, login_error = get_api(
-            simulation=get_simulation_default() if simulation is None else simulation
+        api, login_error = sinopac_api.get_api(
+            simulation=sinopac_api.get_simulation_default() if simulation is None else simulation
         )
         if login_error:
             data = DEFAULT_MARKET_DATA.copy()
             data["error"] = login_error
             return data
 
-    return get_realtime_data_from_sinopac(api, product_root=product_root)
+    try:
+        return sinopac_api.get_realtime_data_from_sinopac(api, product_root=product_root)
+    except TypeError:
+        return sinopac_api.get_realtime_data_from_sinopac(api)

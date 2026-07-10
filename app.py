@@ -3,21 +3,12 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+import sinopac_api
 from backtester import run_backtest
 from indicators import build_tech_data
 from market_data import get_public_market_data
 from paper_broker import PaperBroker
-from realtime_api import get_realtime_data
 from scoring import get_decision_score
-from sinopac_api import (
-    DEFAULT_FUTURES_ROOT,
-    get_api,
-    get_connection_status,
-    get_fut_positions,
-    get_recent_micro_txf_kbars,
-    get_simulation_default,
-    has_credentials,
-)
 from strategy import StrategyManager
 
 
@@ -30,7 +21,7 @@ st.set_page_config(
 
 
 PRODUCT_NAME = "微型臺指近月"
-PRODUCT_ROOT = DEFAULT_FUTURES_ROOT
+PRODUCT_ROOT = getattr(sinopac_api, "DEFAULT_FUTURES_ROOT", "TMF")
 CONTRACT_MULTIPLIER = 10
 DEFAULT_QUANTITY = 1
 SIGNAL_TIMEFRAME = "15min"
@@ -143,6 +134,58 @@ def empty_option_levels():
 
 def empty_mtx_net():
     return {"net_oi": None, "long_short_ratio": None, "source": "TAIFEX", "date": None, "error": None}
+
+
+def get_simulation_default_safe():
+    getter = getattr(sinopac_api, "get_simulation_default", None)
+    return getter() if getter else True
+
+
+def has_credentials_safe(api_key="", secret_key=""):
+    checker = getattr(sinopac_api, "has_credentials", None)
+    return checker(api_key, secret_key) if checker else bool(api_key and secret_key)
+
+
+def get_realtime_data_safe(api, product_root=PRODUCT_ROOT):
+    default_data = {
+        "current_price": 0.0,
+        "volume": 0,
+        "vwap": 0.0,
+        "vix": 0.0,
+        "source": "Sinopac",
+        "updated_at": None,
+        "contract_code": "",
+        "delivery_date": "",
+        "error": None,
+    }
+
+    if api is None:
+        default_data["error"] = "尚未登入永豐 API。"
+        return default_data
+
+    getter = getattr(sinopac_api, "get_realtime_data_from_sinopac", None)
+    if getter is None:
+        default_data["error"] = "sinopac_api.py 缺少 get_realtime_data_from_sinopac。"
+        return default_data
+
+    try:
+        return getter(api, product_root=product_root)
+    except TypeError:
+        return getter(api)
+
+
+def get_micro_kbars_safe(api):
+    getter = getattr(sinopac_api, "get_recent_micro_txf_kbars", None)
+    if getter:
+        return getter(api)
+
+    fallback = getattr(sinopac_api, "get_recent_txf_kbars", None)
+    if fallback:
+        df, error = fallback(api)
+        warning = "目前 sinopac_api.py 尚未提供微型臺指 K 線函式，暫時退回舊版 K 線來源。"
+        return df, f"{warning} {error or ''}".strip()
+
+    return pd.DataFrame(), "sinopac_api.py 缺少 K 線讀取函式。"
 
 
 def action_to_text(action, paper_position=0):
@@ -308,7 +351,7 @@ with st.sidebar:
 
     st.divider()
     st.subheader("永豐 Shioaji")
-    simulation_mode = st.checkbox("使用模擬模式", value=get_simulation_default())
+    simulation_mode = st.checkbox("使用模擬模式", value=get_simulation_default_safe())
     sj_api_key = st.text_input("SJ API Key", type="password", help="可改用 Streamlit secrets 或環境變數 SJ_API_KEY")
     sj_secret_key = st.text_input("SJ Secret Key", type="password", help="可改用 Streamlit secrets 或環境變數 SJ_SECRET_KEY")
     if simulation_mode:
@@ -335,7 +378,7 @@ with st.sidebar:
         st.rerun()
 
 
-api, api_error = get_api(
+api, api_error = sinopac_api.get_api(
     simulation=simulation_mode,
     api_key=sj_api_key,
     secret_key=sj_secret_key,
@@ -355,8 +398,8 @@ with st.spinner("更新市場資料中..."):
         "txf_institutional",
         empty_institutional_data("TAIFEX 法人籌碼資料尚未載入，請重新部署或清除快取後再試。"),
     )
-    realtime = get_realtime_data(api, product_root=PRODUCT_ROOT)
-    raw_kbars, kbars_error = get_recent_micro_txf_kbars(api)
+    realtime = get_realtime_data_safe(api, product_root=PRODUCT_ROOT)
+    raw_kbars, kbars_error = get_micro_kbars_safe(api)
     kbars = resample_signal_kbars(raw_kbars, SIGNAL_TIMEFRAME)
 
 
@@ -620,7 +663,7 @@ elif page == "帳務參考":
     if api is None:
         st.info("尚未登入永豐 API，請先在側邊欄輸入 API Key / Secret 或設定環境變數。")
     elif st.button("更新永豐部位", use_container_width=True):
-        df_pos = get_fut_positions(api)
+        df_pos = sinopac_api.get_fut_positions(api)
         if df_pos.empty:
             st.info("目前沒有期貨/選擇權未平倉部位。")
         else:
@@ -658,9 +701,9 @@ elif page == "進階診斷":
         for warning in data_warnings:
             if warning:
                 st.warning(warning)
-        if not has_credentials(sj_api_key, sj_secret_key):
+        if not has_credentials_safe(sj_api_key, sj_secret_key):
             st.info("永豐功能可使用環境變數或 Streamlit secrets：SJ_API_KEY、SJ_SECRET_KEY、SJ_SIMULATION。")
-        st.json(get_connection_status(api, simulation_mode))
+        st.json(sinopac_api.get_connection_status(api, simulation_mode))
         st.write(
             {
                 "snapshot_source": realtime.get("source"),
