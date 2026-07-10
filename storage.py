@@ -12,12 +12,57 @@ def _connect(db_path=DB_PATH):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS app_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_key TEXT UNIQUE NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            contract_code TEXT,
+            bar_time TEXT,
+            action TEXT,
+            score INTEGER,
+            label TEXT,
+            price REAL,
+            entry_price REAL,
+            stop_loss_price REAL,
+            take_profit_price REAL,
+            reasons TEXT,
+            message TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_key TEXT UNIQUE NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            event_type TEXT,
+            title TEXT,
+            body TEXT,
+            status TEXT,
+            detail TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS worker_heartbeats (
+            worker_name TEXT PRIMARY KEY,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            status TEXT,
+            detail TEXT
         )
         """
     )
@@ -98,3 +143,104 @@ def restore_paper_broker_state(broker):
 def clear_paper_broker_state():
     with _connect() as conn:
         conn.execute("DELETE FROM app_state WHERE key = ?", ("paper_broker",))
+
+
+def save_signal(signal):
+    payload = dict(signal)
+    payload["reasons"] = json.dumps(payload.get("reasons", []), ensure_ascii=False)
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO signals (
+                signal_key, contract_code, bar_time, action, score, label, price,
+                entry_price, stop_loss_price, take_profit_price, reasons, message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("signal_key"),
+                payload.get("contract_code"),
+                payload.get("bar_time"),
+                payload.get("action"),
+                payload.get("score"),
+                payload.get("label"),
+                payload.get("price"),
+                payload.get("entry_price"),
+                payload.get("stop_loss_price"),
+                payload.get("take_profit_price"),
+                payload.get("reasons"),
+                payload.get("message"),
+            ),
+        )
+
+
+def save_alert(alert):
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO alerts (alert_key, event_type, title, body, status, detail)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert.get("alert_key"),
+                alert.get("event_type"),
+                alert.get("title"),
+                alert.get("body"),
+                alert.get("status", "created"),
+                alert.get("detail", ""),
+            ),
+        )
+    return cur.rowcount > 0
+
+
+def update_heartbeat(worker_name, status, detail=""):
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO worker_heartbeats (worker_name, updated_at, status, detail)
+            VALUES (?, CURRENT_TIMESTAMP, ?, ?)
+            ON CONFLICT(worker_name) DO UPDATE SET
+                updated_at = CURRENT_TIMESTAMP,
+                status = excluded.status,
+                detail = excluded.detail
+            """,
+            (worker_name, status, detail),
+        )
+
+
+def get_worker_heartbeat(worker_name="signal_worker"):
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT worker_name, updated_at, status, detail FROM worker_heartbeats WHERE worker_name = ?",
+            (worker_name,),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def get_recent_alerts(limit=20):
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT created_at, event_type, title, body, status, detail
+            FROM alerts
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_recent_signals(limit=20):
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT created_at, contract_code, bar_time, action, score, label, price,
+                   entry_price, stop_loss_price, take_profit_price, message
+            FROM signals
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    return [dict(row) for row in rows]

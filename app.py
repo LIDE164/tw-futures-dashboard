@@ -3,17 +3,24 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-import sinopac_api
 from backtester import run_backtest
-from charting import build_signal_chart
+from charting import PLOT_CONFIG, build_daily_chart, build_signal_chart, prepare_daily_chart
 from indicators import build_tech_data
 from market_session import TAIPEI, format_datetime, get_market_status
 from market_data import get_public_market_data
 from paper_broker import PaperBroker
 from risk_manager import evaluate_entry_risk
 from scoring import get_decision_score
-from storage import clear_paper_broker_state, restore_paper_broker_state, save_paper_broker_state
+from storage import (
+    clear_paper_broker_state,
+    get_recent_alerts,
+    get_recent_signals,
+    get_worker_heartbeat,
+    restore_paper_broker_state,
+    save_paper_broker_state,
+)
 from strategy import StrategyManager
+import sinopac_api
 
 
 st.set_page_config(
@@ -596,23 +603,57 @@ tone = "info" if not market_status.is_open and active_broker.position == 0 else 
 age_seconds = data_age_seconds(realtime.get("updated_at"))
 max_loss_per_contract = stop_loss_points * CONTRACT_MULTIPLIER
 estimated_cost = commission_per_side * 2 + slippage_points * 2 * CONTRACT_MULTIPLIER
+previous_price = st.session_state.get("previous_price")
+price_delta = current_price - previous_price if previous_price and current_price else 0
+st.session_state.previous_price = current_price
 
-st.title("期權戰情室")
+entry_actions = {"BUY_LONG", "SELL_SHORT"}
+data_is_fresh = age_seconds is not None and age_seconds <= 30
+entry_signal = action in entry_actions
+can_consider_entry = entry_signal and market_status.is_open and data_is_fresh and risk_decision.allowed
+if can_consider_entry:
+    execution_status = "可考慮進場"
+elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
+    execution_status = "優先處理平倉"
+elif entry_signal:
+    execution_status = "方向成立，但目前不建議進場"
+else:
+    execution_status = "先觀望"
+
 contract_text = realtime.get("contract_code") or (kbars.attrs.get("contract_code", "") if hasattr(kbars, "attrs") else "")
 delivery_text = realtime.get("delivery_date") or (kbars.attrs.get("delivery_date", "") if hasattr(kbars, "attrs") else "")
+st.title("期權戰情室")
+
+with st.container(border=True):
+    st.caption(f"{PRODUCT_NAME}｜{contract_text or '無資料'}｜到期 {delivery_text or '無資料'}")
+    st.caption(f"{market_status.label}｜行情價格每次刷新更新｜策略訊號只用完整 15 分 K")
+    st.metric(
+        "最新成交" if market_status.is_open else "最近價格",
+        format_price(current_price),
+        f"{price_delta:+,.0f} 點" if price_delta else None,
+    )
+    quote_col1, quote_col2, quote_col3 = st.columns(3)
+    quote_col1.metric(
+        "立即賣出參考",
+        format_price(realtime.get("bid_price")),
+        f"{int(realtime.get('bid_volume') or 0)} 口" if realtime.get("bid_volume") else None,
+    )
+    quote_col2.metric(
+        "立即買進參考",
+        format_price(realtime.get("ask_price")),
+        f"{int(realtime.get('ask_volume') or 0)} 口" if realtime.get("ask_volume") else None,
+    )
+    quote_col3.metric("買賣價差", f"{float(realtime.get('spread') or 0):,.0f} 點" if realtime.get("spread") else "無資料")
+    st.caption(
+        f"最後成交：{realtime.get('exchange_timestamp') or 'snapshot 未提供交易所時間'}｜"
+        f"API 更新：{data_freshness_label(age_seconds)}｜資料來源：{realtime.get('source', 'fallback')}"
+    )
+    st.caption("做多看賣一，做空看買一；單一檔掛量只供流動性參考。")
+
 st.caption(
-    f"商品：{PRODUCT_NAME}｜契約：{contract_text or '無資料'}｜契約到期日：{delivery_text or '無資料'}"
-)
-st.caption(
-    f"市場狀態：{market_status.label}｜"
     f"下一次開盤：{format_datetime(market_status.next_open)}｜"
-    f"最後有效訊號：{latest_completed_bar_text(kbars)}"
+    f"最後有效訊號：{latest_completed_bar_text(kbars)}｜模式：{system_mode}"
 )
-st.caption(
-    f"訊號週期：15 分鐘｜API 更新：{data_freshness_label(age_seconds)}｜"
-    f"最後成交：{realtime.get('exchange_timestamp') or 'snapshot 未提供交易所時間'}"
-)
-st.caption(f"資料來源：{realtime.get('source', 'fallback')}｜模式：{system_mode}")
 
 if age_seconds is None or age_seconds > 30:
     st.error("API 查詢時間可能已過期，請先重新整理，不要直接依照舊畫面操作。")
@@ -621,16 +662,21 @@ if not market_status.is_open:
     st.warning("目前不是交易時段；首頁只顯示下次開盤預備計畫，不提供可直接成交的進場價。")
 
 with st.container(border=True):
-    st.subheader("現在建議")
-    price_col, action_col = st.columns(2)
-    price_col.metric("目前價格" if market_status.is_open else "最近價格", format_price(current_price))
-    action_col.metric("操作方向", trade_plan["title"])
+    st.subheader("操作卡")
+    signal_col, status_col = st.columns(2)
+    signal_col.metric("目前策略", trade_plan["title"])
+    status_col.metric("狀態", execution_status)
 
-    bid_col, ask_col, spread_col = st.columns(3)
-    bid_col.metric("買一", format_price(realtime.get("bid_price")))
-    ask_col.metric("賣一", format_price(realtime.get("ask_price")))
-    spread_col.metric("價差", format_price(realtime.get("spread")))
+    entry_col, stop_col, target_col = st.columns(3)
+    entry_col.metric("進場", format_price(trade_plan["entry_price"]))
+    stop_col.metric("停損", format_price(trade_plan["stop_loss"]))
+    target_col.metric("停利", format_price(trade_plan["take_profit"]))
+    risk_col, cost_col = st.columns(2)
+    risk_col.metric("1口最大風險", format_money(max_loss_per_contract))
+    cost_col.metric("預估來回成本", format_money(estimated_cost))
 
+    st.write("平倉條件")
+    st.write(trade_plan["close_rule"])
     signal_message = f"{trade_plan['summary']}\n\n補充：{msg}"
     if tone == "success":
         st.success(signal_message)
@@ -647,33 +693,36 @@ with st.container(border=True):
         for item in risk_decision.reasons:
             st.write(f"- {item}")
 
-with st.container(border=True):
-    st.subheader("交易計畫")
-    entry_col, stop_col = st.columns(2)
-    target_col, close_col = st.columns(2)
-    entry_col.metric("建議進場價", format_price(trade_plan["entry_price"]))
-    stop_col.metric("停損價", format_price(trade_plan["stop_loss"]))
-    target_col.metric("目標平倉價", format_price(trade_plan["take_profit"]))
-    close_col.write("平倉條件")
-    close_col.write(trade_plan["close_rule"])
-    risk_col, cost_col = st.columns(2)
-    risk_col.metric("每口最大預估虧損", format_money(max_loss_per_contract))
-    cost_col.metric("預估來回成本", format_money(estimated_cost))
+st.caption(
+    f"風控：今日 {risk_decision.daily_trades}/3 筆｜"
+    f"已實現 {format_money(risk_decision.daily_pnl)}｜"
+    f"連虧 {risk_decision.consecutive_losses}/2"
+)
 
 with st.container(border=True):
-    st.subheader("風控狀態")
-    r1, r2, r3 = st.columns(3)
-    r1.metric("今日新進場", f"{risk_decision.daily_trades}/3")
-    r2.metric("今日已實現", format_money(risk_decision.daily_pnl))
-    r3.metric("連續虧損", f"{risk_decision.consecutive_losses}/2")
-
-with st.container(border=True):
-    st.subheader("15 分 K 線")
-    fig = build_signal_chart(kbars, trade_plan)
+    chart_mode = st.radio(
+        "圖表",
+        ["近一月趨勢", "15 分交易圖"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    fig = build_daily_chart(raw_kbars) if chart_mode == "近一月趨勢" else build_signal_chart(kbars, trade_plan)
     if fig is not None:
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
+    elif chart_mode == "近一月趨勢" and raw_kbars is not None and not raw_kbars.empty:
+        daily = prepare_daily_chart(raw_kbars)
+        chart_df = daily.set_index("ts")[["Close", "MA5", "MA10", "MA20"]].dropna(how="all") if not daily.empty else pd.DataFrame()
+        if chart_df.empty:
+            st.info("尚無足夠日 K 資料可繪圖。")
+        else:
+            st.line_chart(chart_df)
+            st.caption("目前環境未安裝 Plotly，先以收盤線替代 K 線圖。")
     elif kbars is not None and not kbars.empty and "Close" in kbars.columns:
-        chart_df = kbars.tail(80).set_index("ts")[["Close"]]
+        if chart_mode == "近一月趨勢":
+            daily = prepare_daily_chart(raw_kbars)
+            chart_df = daily.set_index("ts")[["Close", "MA5", "MA10", "MA20"]].dropna(how="all") if not daily.empty else pd.DataFrame()
+        else:
+            chart_df = kbars.tail(80).set_index("ts")[["Close"]]
         st.line_chart(chart_df)
         st.caption("目前環境未安裝 Plotly，先以收盤線替代 K 線圖。")
     else:
@@ -689,11 +738,40 @@ with st.expander("進階摘要", expanded=False):
 
 page = st.selectbox(
     "查看更多資訊",
-    ["新手首頁", "法人籌碼", "選擇權區間", "模擬部位", "回測系統", "帳務參考", "進階診斷"],
+    ["新手首頁", "警報服務", "法人籌碼", "選擇權區間", "模擬部位", "回測系統", "帳務參考", "進階診斷"],
 )
 
 if page == "新手首頁":
     st.caption("上方已整理目前價格、操作方向、原因、進場參考、停損與目標價。")
+
+elif page == "警報服務":
+    st.subheader("背景警報服務")
+    st.caption("signal_worker.py 需在另一個行程常駐執行；Streamlit 只顯示狀態與紀錄。")
+    heartbeat = get_worker_heartbeat()
+    if heartbeat:
+        h1, h2 = st.columns(2)
+        h1.metric("Worker 狀態", heartbeat.get("status", "未知"))
+        h2.metric("最後心跳", heartbeat.get("updated_at", "無資料"))
+        st.write(heartbeat.get("detail", ""))
+    else:
+        st.warning("尚未收到 signal_worker 心跳。")
+
+    st.write("啟動指令")
+    st.code("python signal_worker.py --interval 30", language="bash")
+
+    recent_signals = get_recent_signals(20)
+    st.subheader("最近訊號")
+    if recent_signals:
+        st.dataframe(pd.DataFrame(recent_signals), use_container_width=True)
+    else:
+        st.info("尚無訊號紀錄。")
+
+    recent_alerts = get_recent_alerts(20)
+    st.subheader("最近警報")
+    if recent_alerts:
+        st.dataframe(pd.DataFrame(recent_alerts), use_container_width=True)
+    else:
+        st.info("尚無警報紀錄。")
 
 elif page == "法人籌碼":
     st.subheader("三大法人期貨未平倉")

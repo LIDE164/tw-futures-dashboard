@@ -2,7 +2,21 @@ import os
 from datetime import datetime, timedelta
 
 import pandas as pd
-import streamlit as st
+
+try:
+    import streamlit as st
+except Exception:  # pragma: no cover
+    class _NoStreamlit:
+        secrets = {}
+
+        @staticmethod
+        def cache_resource(*args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+    st = _NoStreamlit()
 
 try:
     from dotenv import load_dotenv
