@@ -31,63 +31,66 @@ class StrategyManager:
         self.short_exit_score = int(short_exit_score)
         self.stop_loss_points = float(stop_loss_points)
 
-    def reset(self):
-        self.position = 0
-        self.entry_price = 0.0
+    def sync_position(self, position=0, entry_price=0.0):
+        self.position = int(position)
+        self.entry_price = float(entry_price or 0)
 
-    def get_trade_action(self, current_score, current_price):
+    def reset(self):
+        self.sync_position(0, 0.0)
+
+    def decide_action(self, current_score, current_price):
         current_score = int(current_score)
         current_price = float(current_price or 0)
 
         if current_price <= 0:
             return "HOLD", "目前價格資料異常，暫停產生交易指令。"
 
-        action = "HOLD"
-        reason = "目前無新訊號，維持既有留倉狀態。"
-
         if self.position == 0:
             if current_score >= self.long_entry_score:
-                self.position = 1
-                self.entry_price = current_price
-                action = "BUY_LONG"
-                reason = f"技術評分達 {current_score} 分，觸發做多進場。"
-            elif current_score <= self.short_entry_score:
-                self.position = -1
-                self.entry_price = current_price
-                action = "SELL_SHORT"
-                reason = f"技術評分降至 {current_score} 分，觸發放空進場。"
-            else:
-                reason = (
-                    f"評分位於觀望區間，等待突破 {self.long_entry_score} "
-                    f"或跌破 {self.short_entry_score} 分。"
-                )
+                return "BUY_LONG", f"技術評分達 {current_score} 分，觸發做多進場訊號。"
 
-        elif self.position == 1:
-            profit = current_price - self.entry_price
+            if current_score <= self.short_entry_score:
+                return "SELL_SHORT", f"技術評分降至 {current_score} 分，觸發放空進場訊號。"
 
-            if profit <= -self.stop_loss_points:
-                self.reset()
-                action = "CLOSE_LONG"
-                reason = f"強制停損：多單虧損 {profit:+.0f} 點，觸發風控平倉。"
-            elif current_score < self.long_exit_score:
-                self.reset()
-                action = "CLOSE_LONG"
-                reason = f"策略平倉：評分降至 {current_score} 分，多單平倉，損益 {profit:+.0f} 點。"
-            else:
-                reason = f"多單續抱中，當前波段損益 {profit:+.0f} 點，進場點 {self.entry_price:,.0f}。"
+            return (
+                "HOLD",
+                f"評分位於觀望區間，等待突破 {self.long_entry_score} 或跌破 {self.short_entry_score} 分。",
+            )
 
-        elif self.position == -1:
-            profit = self.entry_price - current_price
+        if self.position > 0:
+            profit_points = current_price - self.entry_price
 
-            if profit <= -self.stop_loss_points:
-                self.reset()
-                action = "CLOSE_SHORT"
-                reason = f"強制停損：空單虧損 {profit:+.0f} 點，觸發風控平倉。"
-            elif current_score > self.short_exit_score:
-                self.reset()
-                action = "CLOSE_SHORT"
-                reason = f"策略平倉：評分回升至 {current_score} 分，空單平倉，損益 {profit:+.0f} 點。"
-            else:
-                reason = f"空單續抱中，當前波段損益 {profit:+.0f} 點，進場點 {self.entry_price:,.0f}。"
+            if profit_points <= -self.stop_loss_points:
+                return "CLOSE_LONG", f"多單達停損條件：{profit_points:+.0f} 點，產生平倉訊號。"
 
-        return action, reason
+            if current_score < self.long_exit_score:
+                return "CLOSE_LONG", f"評分降至 {current_score} 分，多單產生策略平倉訊號。"
+
+            return "HOLD", f"多單續抱觀察，波段點數 {profit_points:+.0f}，進場點 {self.entry_price:,.0f}。"
+
+        if self.position < 0:
+            profit_points = self.entry_price - current_price
+
+            if profit_points <= -self.stop_loss_points:
+                return "CLOSE_SHORT", f"空單達停損條件：{profit_points:+.0f} 點，產生平倉訊號。"
+
+            if current_score > self.short_exit_score:
+                return "CLOSE_SHORT", f"評分回升至 {current_score} 分，空單產生策略平倉訊號。"
+
+            return "HOLD", f"空單續抱觀察，波段點數 {profit_points:+.0f}，進場點 {self.entry_price:,.0f}。"
+
+        return "HOLD", "策略狀態異常，暫停產生交易指令。"
+
+    def apply_fill(self, action, fill_price, quantity=1):
+        fill_price = float(fill_price or 0)
+        quantity = int(quantity)
+
+        if action == "BUY_LONG":
+            self.sync_position(quantity, fill_price)
+        elif action == "SELL_SHORT":
+            self.sync_position(-quantity, fill_price)
+        elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
+            self.reset()
+
+    def get_trade_action(self, current_score, current_price):
+        return self.decide_action(current_score, current_price)
