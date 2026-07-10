@@ -11,6 +11,8 @@ DEFAULT_MARKET_DATA = {
     "vwap": 0.0,
     "source": "Sinopac",
     "updated_at": None,
+    "quote_received_at": None,
+    "exchange_timestamp": "",
     "contract_code": "",
     "delivery_date": "",
     "error": None,

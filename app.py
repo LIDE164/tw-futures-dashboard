@@ -6,6 +6,7 @@ import streamlit as st
 import sinopac_api
 from backtester import run_backtest
 from indicators import build_tech_data
+from market_session import TAIPEI, format_datetime, get_market_status
 from market_data import get_public_market_data
 from paper_broker import PaperBroker
 from scoring import get_decision_score
@@ -80,6 +81,8 @@ def resample_signal_kbars(df, rule=SIGNAL_TIMEFRAME):
         .dropna()
         .reset_index()
     )
+    current_bucket = pd.Timestamp.now(tz=TAIPEI).tz_localize(None).floor(rule)
+    out = out[out["ts"] < current_bucket].copy()
     out.attrs.update(df.attrs)
     out.attrs["signal_timeframe"] = rule
     return out
@@ -91,7 +94,7 @@ def latest_completed_bar_text(df):
     latest_ts = pd.to_datetime(df["ts"], errors="coerce").dropna()
     if latest_ts.empty:
         return "無資料"
-    return latest_ts.iloc[-1].strftime("%H:%M")
+    return latest_ts.iloc[-1].strftime("%Y/%m/%d %H:%M")
 
 
 def data_age_seconds(updated_at):
@@ -155,6 +158,8 @@ def get_realtime_data_safe(api, product_root=PRODUCT_ROOT):
         "vix": 0.0,
         "source": "Sinopac",
         "updated_at": None,
+        "quote_received_at": None,
+        "exchange_timestamp": "",
         "contract_code": "",
         "delivery_date": "",
         "error": None,
@@ -248,10 +253,11 @@ def estimated_fill_price(action, price, slippage_points):
     return price
 
 
-def build_trade_plan(action, current_price, strategy, paper_broker, system_mode, slippage_points=0.0):
+def build_trade_plan(action, current_price, strategy, paper_broker, system_mode, market_status, slippage_points=0.0):
     stop_gap = float(strategy.stop_loss_points)
     reward_gap = float(strategy.take_profit_points)
-    has_paper_position = system_mode == "模擬盤模式" and paper_broker.position != 0
+    has_paper_position = system_mode in {"模擬盤模式", "實盤觀察模式"} and paper_broker.position != 0
+    position_source = "模擬帳本" if system_mode == "模擬盤模式" else "手動同步部位"
     entry_price = paper_broker.entry_price if has_paper_position else current_price
 
     plan = {
@@ -262,6 +268,40 @@ def build_trade_plan(action, current_price, strategy, paper_broker, system_mode,
         "take_profit": None,
         "close_rule": "等待分數突破進場門檻後再規劃。",
     }
+
+    if not market_status.is_open:
+        if has_paper_position:
+            direction = "多單" if paper_broker.position > 0 else "空單"
+            plan.update(
+                {
+                    "title": "休市｜持倉風險",
+                    "summary": f"市場目前為{market_status.label}，{position_source}仍持有{direction}。休市期間無法保證按停損或停利價成交。",
+                    "entry_price": paper_broker.entry_price,
+                    "stop_loss": paper_broker.stop_loss_price or None,
+                    "take_profit": paper_broker.take_profit_price or None,
+                    "close_rule": "下次開盤若跳空，實際損益可能大於原本停損設定；開盤後請重新檢查部位。",
+                }
+            )
+            return plan
+
+        if action == "BUY_LONG":
+            next_bias = "偏多"
+        elif action == "SELL_SHORT":
+            next_bias = "偏空"
+        else:
+            next_bias = "觀望"
+
+        plan.update(
+            {
+                "title": f"{market_status.label}｜下次開盤觀察{next_bias}",
+                "summary": "目前不是交易時段，不提供可直接成交的進場價。開盤後需等待第一根完整 15 分 K 再重新確認。",
+                "entry_price": None,
+                "stop_loss": None,
+                "take_profit": None,
+                "close_rule": "開盤後重新計算進場、停損與停利；若跳空過大，原本訊號視為失效。",
+            }
+        )
+        return plan
 
     if action == "BUY_LONG":
         fill_price = estimated_fill_price(action, current_price, slippage_points)
@@ -306,7 +346,7 @@ def build_trade_plan(action, current_price, strategy, paper_broker, system_mode,
     elif has_paper_position and paper_broker.position > 0:
         plan.update(
             {
-                "summary": "模擬帳本目前持有多單，先照原計畫觀察。",
+                "summary": f"{position_source}目前持有多單，先照原計畫觀察。",
                 "entry_price": paper_broker.entry_price,
                 "stop_loss": paper_broker.stop_loss_price or paper_broker.entry_price - stop_gap,
                 "take_profit": paper_broker.take_profit_price or paper_broker.entry_price + reward_gap,
@@ -316,7 +356,7 @@ def build_trade_plan(action, current_price, strategy, paper_broker, system_mode,
     elif has_paper_position and paper_broker.position < 0:
         plan.update(
             {
-                "summary": "模擬帳本目前持有空單，先照原計畫觀察。",
+                "summary": f"{position_source}目前持有空單，先照原計畫觀察。",
                 "entry_price": paper_broker.entry_price,
                 "stop_loss": paper_broker.stop_loss_price or paper_broker.entry_price + stop_gap,
                 "take_profit": paper_broker.take_profit_price or paper_broker.entry_price - reward_gap,
@@ -379,6 +419,23 @@ with st.sidebar:
     slippage_points = st.number_input("滑價點數", min_value=1.0, max_value=20.0, value=2.0, step=0.5)
     commission_per_side = st.number_input("單邊手續費", min_value=1.0, max_value=500.0, value=20.0, step=1.0)
 
+    manual_position = 0
+    manual_entry_price = 0.0
+    manual_stop_loss_price = 0.0
+    manual_take_profit_price = 0.0
+    if system_mode == "實盤觀察模式":
+        st.divider()
+        st.subheader("手動部位同步")
+        st.caption("只用來提醒與顯示，不會送出任何委託。")
+        manual_side = st.selectbox("目前手動部位", ["空手", "多單 1 口", "空單 1 口"])
+        manual_position = 1 if manual_side == "多單 1 口" else -1 if manual_side == "空單 1 口" else 0
+        if manual_position:
+            manual_entry_price = st.number_input("實際成交價", min_value=0.0, value=0.0, step=1.0)
+            manual_stop_loss_price = st.number_input("手動停損價", min_value=0.0, value=0.0, step=1.0)
+            manual_take_profit_price = st.number_input("手動停利價", min_value=0.0, value=0.0, step=1.0)
+            if manual_entry_price <= 0:
+                st.warning("請填入實際成交價，系統才會啟用手動部位提醒。")
+
     if st.button("重新整理資料", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -423,6 +480,7 @@ data_warnings = [
     *public_data.get("errors", []),
 ]
 
+market_status = get_market_status()
 
 current_price = realtime["current_price"]
 tech_data = build_tech_data(kbars, realtime)
@@ -453,12 +511,32 @@ paper_broker.multiplier = contract_multiplier
 paper_broker.commission_per_side = commission_per_side
 paper_broker.slippage_points = slippage_points
 
+manual_position_enabled = system_mode == "實盤觀察模式" and manual_position and manual_entry_price > 0
+active_broker = paper_broker
+if manual_position_enabled:
+    active_broker = PaperBroker(
+        multiplier=contract_multiplier,
+        commission_per_side=commission_per_side,
+        slippage_points=slippage_points,
+        position=manual_position,
+        entry_price=manual_entry_price,
+        stop_loss_price=manual_stop_loss_price,
+        take_profit_price=manual_take_profit_price,
+    )
+
 if system_mode == "模擬盤模式":
     st.session_state.strategy.sync_position(
         paper_broker.position,
         paper_broker.entry_price,
         paper_broker.stop_loss_price,
         paper_broker.take_profit_price,
+    )
+elif manual_position_enabled:
+    st.session_state.strategy.sync_position(
+        active_broker.position,
+        active_broker.entry_price,
+        active_broker.stop_loss_price,
+        active_broker.take_profit_price,
     )
 else:
     st.session_state.strategy.sync_position(0, 0.0)
@@ -479,11 +557,15 @@ trade_plan = build_trade_plan(
     action,
     current_price,
     st.session_state.strategy,
-    paper_broker,
+    active_broker,
     system_mode,
+    market_status,
     slippage_points,
 )
-tone = signal_state(action, paper_broker.position if system_mode == "模擬盤模式" else 0)
+tone = "info" if not market_status.is_open and active_broker.position == 0 else signal_state(
+    action,
+    active_broker.position if system_mode in {"模擬盤模式", "實盤觀察模式"} else 0,
+)
 age_seconds = data_age_seconds(realtime.get("updated_at"))
 max_loss_per_contract = stop_loss_points * CONTRACT_MULTIPLIER
 estimated_cost = commission_per_side * 2 + slippage_points * 2 * CONTRACT_MULTIPLIER
@@ -492,19 +574,29 @@ st.title("期權戰情室")
 contract_text = realtime.get("contract_code") or (kbars.attrs.get("contract_code", "") if hasattr(kbars, "attrs") else "")
 delivery_text = realtime.get("delivery_date") or (kbars.attrs.get("delivery_date", "") if hasattr(kbars, "attrs") else "")
 st.caption(
-    f"商品：{PRODUCT_NAME} {contract_text} {delivery_text}｜"
-    f"訊號週期：15 分鐘｜最近完成 K 棒：{latest_completed_bar_text(kbars)}｜"
-    f"資料狀態：{data_freshness_label(age_seconds)}"
+    f"商品：{PRODUCT_NAME}｜契約：{contract_text or '無資料'}｜契約到期日：{delivery_text or '無資料'}"
+)
+st.caption(
+    f"市場狀態：{market_status.label}｜"
+    f"下一次開盤：{format_datetime(market_status.next_open)}｜"
+    f"最後有效訊號：{latest_completed_bar_text(kbars)}"
+)
+st.caption(
+    f"訊號週期：15 分鐘｜API 更新：{data_freshness_label(age_seconds)}｜"
+    f"最後成交：{realtime.get('exchange_timestamp') or 'snapshot 未提供交易所時間'}"
 )
 st.caption(f"資料來源：{realtime.get('source', 'fallback')}｜模式：{system_mode}")
 
 if age_seconds is None or age_seconds > 30:
-    st.error("資料可能已過期，請先重新整理，不要直接依照舊畫面操作。")
+    st.error("API 查詢時間可能已過期，請先重新整理，不要直接依照舊畫面操作。")
+
+if not market_status.is_open:
+    st.warning("目前不是交易時段；首頁只顯示下次開盤預備計畫，不提供可直接成交的進場價。")
 
 with st.container(border=True):
     st.subheader("現在建議")
     price_col, action_col = st.columns(2)
-    price_col.metric("目前價格", format_price(current_price))
+    price_col.metric("目前價格" if market_status.is_open else "最近價格", format_price(current_price))
     action_col.metric("操作方向", trade_plan["title"])
 
     signal_message = f"{trade_plan['summary']}\n\n補充：{msg}"
@@ -590,7 +682,7 @@ elif page == "模擬部位":
     p3.metric("已實現損益", f"{paper_broker.realized_pnl:,.0f}")
     p4.metric("未實現損益", f"{paper_broker.unrealized_pnl(current_price):,.0f}")
 
-    can_paper_execute = action in {"BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT"}
+    can_paper_execute = market_status.is_open and action in {"BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT"}
     col_exec, col_reset = st.columns(2)
     with col_exec:
         if st.button(

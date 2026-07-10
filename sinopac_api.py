@@ -249,6 +249,14 @@ def _contract_label(contract):
     return f"{code} {delivery}".strip()
 
 
+def _snapshot_timestamp(snapshot):
+    for field_name in ("ts", "datetime", "time", "date"):
+        value = getattr(snapshot, field_name, None)
+        if value:
+            return str(value)
+    return ""
+
+
 def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contract_code=None):
     if api is None:
         return {
@@ -258,6 +266,8 @@ def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contr
             "vix": 0.0,
             "source": "Sinopac",
             "updated_at": None,
+            "quote_received_at": None,
+            "exchange_timestamp": "",
             "error": "尚未登入永豐 API。",
         }
 
@@ -273,6 +283,8 @@ def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contr
                 "vix": 0.0,
                 "source": f"Sinopac {product_root} snapshot",
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "quote_received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "exchange_timestamp": "",
                 "error": "永豐 Shioaji snapshot 無資料，可能非交易時段或尚未登入成功。",
                 "contract_code": getattr(contract, "code", ""),
                 "delivery_date": getattr(contract, "delivery_date", ""),
@@ -292,6 +304,8 @@ def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contr
             "vix": 0.0,
             "source": f"Sinopac {_contract_label(contract)} snapshot",
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "quote_received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "exchange_timestamp": _snapshot_timestamp(snapshot),
             "error": None if close > 0 else "永豐 snapshot 未提供有效成交價。",
             "contract_code": getattr(contract, "code", ""),
             "delivery_date": getattr(contract, "delivery_date", ""),
@@ -304,6 +318,8 @@ def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contr
             "vix": 0.0,
             "source": "Sinopac snapshot",
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "quote_received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "exchange_timestamp": "",
             "error": f"永豐行情讀取失敗：{exc}",
             "contract_code": "",
             "delivery_date": "",
