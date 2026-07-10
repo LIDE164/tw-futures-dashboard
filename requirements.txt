@@ -3,3 +3,5 @@ requests
 pandas
 yfinance
 lxml
+shioaji
+python-dotenv
