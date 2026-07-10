@@ -1,6 +1,7 @@
 import streamlit as st
 
 from indicators import build_tech_data
+from market_data import get_public_market_data
 from realtime_api import get_realtime_data
 from scoring import get_decision_score
 from scraper import get_taifex_institutional_oi
@@ -35,6 +36,17 @@ def metric_delta(value):
     if value < 0:
         return "淨空"
     return "待更新"
+
+
+def format_optional_number(value, suffix=""):
+    if value in (None, ""):
+        return "無資料"
+    return f"{value:,.0f}{suffix}"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_public_market_data():
+    return get_public_market_data()
 
 
 with st.sidebar:
@@ -76,11 +88,18 @@ api, api_error = get_api(
 
 with st.spinner("更新市場資料中..."):
     oi_data = load_oi_data(finmind_token)
+    public_data = load_public_market_data()
     realtime = get_realtime_data(api)
     kbars, kbars_error = get_recent_txf_kbars(api)
 
 
-for warning in (api_error, oi_data.get("error"), realtime.get("error"), kbars_error):
+for warning in (
+    api_error,
+    oi_data.get("error"),
+    realtime.get("error"),
+    kbars_error,
+    *public_data.get("errors", []),
+):
     if warning:
         st.warning(warning)
 
@@ -109,7 +128,7 @@ top1, top2, top3, top4 = st.columns(4)
 top1.metric("綜合評分", score, label)
 top2.metric("型態特徵", feature)
 top3.metric("盤中均價線", f"{realtime['vwap']:,.0f}" if realtime["vwap"] else "無資料")
-top4.metric("台指 VIX", "未接資料源")
+top4.metric("30日年化波動", f"{tech_data['30日年化波動率']:.1f}%" if tech_data["30日年化波動率"] else "無資料")
 
 if action == "HOLD":
     st.info(f"AI 策略指令：{action}\n\n{msg}")
@@ -133,6 +152,9 @@ with tab_diag:
                 "kbars_rows": len(kbars),
                 "kbars_contract": kbars.attrs.get("contract_code", "") if hasattr(kbars, "attrs") else "",
                 "kbars_error": kbars_error,
+                "pc_ratio_source": public_data["pc_ratio"].get("source"),
+                "option_source": public_data["option_levels"].get("source"),
+                "mtx_source": public_data["mtx_net"].get("source"),
             }
         )
 
@@ -142,9 +164,19 @@ with tab_diag:
         st.write("目前沒有明確加減分因素。")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("散戶小台多空比", "未接資料源")
+    mtx_net = public_data["mtx_net"]
+    c1.metric(
+        "小台三大法人淨部位",
+        format_optional_number(mtx_net["net_oi"], " 口"),
+        f"多空比 {mtx_net['long_short_ratio']:.2f}%" if mtx_net["long_short_ratio"] else "無資料",
+    )
     c2.metric("成交量", f"{realtime['volume']:,.0f}")
-    c3.metric("選擇權 P/C Ratio", "未接資料源")
+    pc_ratio = public_data["pc_ratio"]
+    c3.metric(
+        "選擇權 P/C Ratio",
+        f"{pc_ratio['oi_ratio']:.2f}%" if pc_ratio["oi_ratio"] else "無資料",
+        f"成交 {pc_ratio['volume_ratio']:.2f}%" if pc_ratio["volume_ratio"] else None,
+    )
 
 with tab_chips:
     st.subheader("三大法人期貨未平倉")
@@ -157,7 +189,24 @@ with tab_chips:
 
 with tab_options:
     st.subheader("選擇權最大未平倉量")
-    st.info("此頁原本的 Call 壓力、Put 支撐是硬寫假資料，已移除。下一步需要串接 TAIFEX 選擇權未平倉或永豐選擇權商品資料後再顯示。")
+    option_levels = public_data["option_levels"]
+    st.caption(
+        f"資料來源：{option_levels.get('source')}｜"
+        f"資料日期：{option_levels.get('date') or '無資料'}｜"
+        f"到期月份：{option_levels.get('expiry') or '無資料'}"
+    )
+    col_call, col_put = st.columns(2)
+    col_call.metric(
+        "Call 壓力",
+        format_optional_number(option_levels["call_pressure"]),
+        f"OI {option_levels['call_oi']:,}" if option_levels["call_oi"] else "無資料",
+        delta_color="inverse",
+    )
+    col_put.metric(
+        "Put 支撐",
+        format_optional_number(option_levels["put_support"]),
+        f"OI {option_levels['put_oi']:,}" if option_levels["put_oi"] else "無資料",
+    )
 
 with tab_account:
     st.subheader("永豐真實期貨部位 / 未實現損益")

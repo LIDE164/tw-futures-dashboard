@@ -1,6 +1,9 @@
 import pandas as pd
 
 
+TRADING_DAYS_PER_YEAR = 252
+
+
 def _column(df, *names):
     for name in names:
         if name in df.columns:
@@ -72,6 +75,13 @@ def build_tech_data(df, realtime=None):
     prev_hist = float(hist.iloc[-2]) if len(hist) >= 2 and not pd.isna(hist.iloc[-2]) else 0.0
     latest_volume = _latest(volume, realtime.get("volume", 0.0))
     avg_volume = _latest(volume.rolling(5).mean(), latest_volume)
+    volatility_30d = (
+        close.pct_change()
+        .rolling(30)
+        .std()
+        .mul(TRADING_DAYS_PER_YEAR ** 0.5)
+        .mul(100)
+    )
 
     return {
         "收盤價": latest_close,
@@ -83,6 +93,7 @@ def build_tech_data(df, realtime=None):
         "訊號": latest_hist > prev_hist,
         "ADX": _adx(high, low, close),
         "回測有撐": bool(latest_bb_dn > 0 and latest_close > latest_bb_dn),
+        "30日年化波動率": _latest(volatility_30d),
         "資料狀態": "永豐 kbars",
         "可評分": True,
     }
@@ -103,6 +114,7 @@ def fallback_tech_data(realtime=None, reason="尚未取得足夠歷史資料"):
         "訊號": False,
         "ADX": 0.0,
         "回測有撐": False,
+        "30日年化波動率": 0.0,
         "資料狀態": reason,
         "可評分": False,
     }
