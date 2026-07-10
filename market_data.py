@@ -136,14 +136,47 @@ def get_mtx_institutional_net():
         }
 
 
+def get_txf_institutional_oi():
+    result = {"外資": 0, "投信": 0, "自營商": 0, "date": None, "error": None}
+
+    try:
+        df = _read_html_tables(FUT_CONTRACTS_URL, header=[0, 1, 2])[0]
+        rows = df[df.iloc[:, 1].astype(str).str.contains("臺股期貨", regex=False, na=False)]
+
+        if rows.empty:
+            raise ValueError("TAIFEX 找不到臺股期貨三大法人資料")
+
+        name_map = {
+            "外資": "外資",
+            "投信": "投信",
+            "自營": "自營商",
+        }
+
+        for _, row in rows.iterrows():
+            identity = str(row.iloc[2])
+            net_oi = int(_to_number(row.iloc[13]))
+
+            for keyword, output_name in name_map.items():
+                if keyword in identity:
+                    result[output_name] = net_oi
+                    break
+
+        result["date"] = "TAIFEX 最新交易日"
+        return result
+    except Exception as exc:
+        result["error"] = f"TAIFEX 臺股期貨法人資料讀取失敗：{exc}"
+        return result
+
+
 def get_public_market_data():
     pc_ratio = get_pc_ratio()
     option_levels = get_option_pressure_support()
     mtx_net = get_mtx_institutional_net()
+    txf_institutional = get_txf_institutional_oi()
 
     errors = [
         item.get("error")
-        for item in (pc_ratio, option_levels, mtx_net)
+        for item in (pc_ratio, option_levels, mtx_net, txf_institutional)
         if item.get("error")
     ]
 
@@ -151,5 +184,6 @@ def get_public_market_data():
         "pc_ratio": pc_ratio,
         "option_levels": option_levels,
         "mtx_net": mtx_net,
+        "txf_institutional": txf_institutional,
         "errors": errors,
     }

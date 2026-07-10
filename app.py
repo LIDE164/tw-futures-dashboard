@@ -4,7 +4,6 @@ from indicators import build_tech_data
 from market_data import get_public_market_data
 from realtime_api import get_realtime_data
 from scoring import get_decision_score
-from scraper import get_taifex_institutional_oi
 from sinopac_api import (
     activate_ca_from_env,
     get_api,
@@ -19,11 +18,6 @@ from strategy import StrategyManager
 
 
 st.set_page_config(page_title="期權戰情室", page_icon="📊", layout="wide")
-
-
-@st.cache_data(ttl=180, show_spinner=False)
-def load_oi_data(api_token):
-    return get_taifex_institutional_oi(api_token=api_token)
 
 
 def format_contracts(value):
@@ -51,7 +45,7 @@ def load_public_market_data():
 
 with st.sidebar:
     st.subheader("金鑰與風控設定")
-    finmind_token = st.text_input("FinMind API Token", type="password", help="輸入 Token 可提高 FinMind API 穩定度")
+    st.caption("法人籌碼、P/C Ratio、選擇權壓力支撐已改用 TAIFEX 公開資料，不再需要 FinMind Token。")
 
     st.divider()
     st.subheader("永豐 Shioaji")
@@ -87,15 +81,14 @@ api, api_error = get_api(
 )
 
 with st.spinner("更新市場資料中..."):
-    oi_data = load_oi_data(finmind_token)
     public_data = load_public_market_data()
+    oi_data = public_data["txf_institutional"]
     realtime = get_realtime_data(api)
     kbars, kbars_error = get_recent_txf_kbars(api)
 
 
 for warning in (
     api_error,
-    oi_data.get("error"),
     realtime.get("error"),
     kbars_error,
     *public_data.get("errors", []),
