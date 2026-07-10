@@ -9,6 +9,7 @@ from indicators import build_tech_data
 from market_data import get_public_market_data
 from paper_broker import PaperBroker
 from scoring import get_decision_score
+from storage import clear_paper_broker_state, restore_paper_broker_state, save_paper_broker_state
 from strategy import StrategyManager
 
 
@@ -352,8 +353,13 @@ with st.sidebar:
     st.divider()
     st.subheader("永豐 Shioaji")
     simulation_mode = st.checkbox("使用模擬模式", value=get_simulation_default_safe())
-    sj_api_key = st.text_input("SJ API Key", type="password", help="可改用 Streamlit secrets 或環境變數 SJ_API_KEY")
-    sj_secret_key = st.text_input("SJ Secret Key", type="password", help="可改用 Streamlit secrets 或環境變數 SJ_SECRET_KEY")
+    st.caption("API Key 會自動讀取 `.env`、環境變數或 Streamlit Secrets。")
+    sj_api_key = ""
+    sj_secret_key = ""
+    with st.expander("開發者設定", expanded=False):
+        st.caption("只有需要臨時覆寫 `.env` 或 Secrets 時才填。")
+        sj_api_key = st.text_input("SJ API Key 覆寫", type="password")
+        sj_secret_key = st.text_input("SJ Secret Key 覆寫", type="password")
     if simulation_mode:
         st.info("若使用正式永豐 API Key 仍收不到行情或帳務資料，請先取消「使用模擬模式」再重新整理。")
 
@@ -383,6 +389,12 @@ api, api_error = sinopac_api.get_api(
     api_key=sj_api_key,
     secret_key=sj_secret_key,
 )
+
+with st.sidebar:
+    if api_error:
+        st.error("永豐行情尚未連線")
+    else:
+        st.success("永豐行情已連線")
 
 with st.spinner("更新市場資料中..."):
     public_data = load_public_market_data()
@@ -434,6 +446,7 @@ if "paper_broker" not in st.session_state:
         commission_per_side=commission_per_side,
         slippage_points=slippage_points,
     )
+    restore_paper_broker_state(st.session_state.paper_broker)
 
 paper_broker = st.session_state.paper_broker
 paper_broker.multiplier = contract_multiplier
@@ -601,6 +614,7 @@ elif page == "模擬部位":
                     trade_plan["stop_loss"] or 0,
                     trade_plan["take_profit"] or 0,
                 )
+                save_paper_broker_state(paper_broker)
                 st.success(fill_msg)
                 st.rerun()
             else:
@@ -609,6 +623,7 @@ elif page == "模擬部位":
         if st.button("重置模擬帳本", use_container_width=True):
             paper_broker.reset()
             st.session_state.strategy.reset()
+            clear_paper_broker_state()
             st.rerun()
 
     trades_df = paper_broker.trades_df()
@@ -661,7 +676,7 @@ elif page == "帳務參考":
     st.caption("這裡只查詢帳務與未實現損益，不送出任何委託。")
 
     if api is None:
-        st.info("尚未登入永豐 API，請先在側邊欄輸入 API Key / Secret 或設定環境變數。")
+        st.info("尚未登入永豐 API，請先設定 `.env`、環境變數或 Streamlit Secrets。")
     elif st.button("更新永豐部位", use_container_width=True):
         df_pos = sinopac_api.get_fut_positions(api)
         if df_pos.empty:

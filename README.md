@@ -12,6 +12,9 @@ SJ_SECRET_KEY=your_sinopac_secret_key
 SJ_SIMULATION=true
 ```
 
+本機可使用 `.env`；Streamlit Cloud 請到網站後台 Secrets 設定，不要把真實 key 推到 GitHub。
+一般使用時不需要在側邊欄手動輸入 API Key，畫面會自動讀取 `.env`、環境變數或 Streamlit Secrets。
+
 ## 系統定位
 
 這不是自動交易系統，而是微型臺指策略研究、模擬交易與手動下單輔助系統。
@@ -31,3 +34,14 @@ SJ_SIMULATION=true
 - 首頁會顯示每口最大預估虧損與預估來回成本
 - 回測暫不使用當日法人籌碼，避免用今天資料回填歷史
 - 停損與停利會寫入模擬持倉，並在策略與回測中實際觸發
+- 模擬帳本會保存到 `data/trading.db`，重啟 Streamlit 後仍可還原模擬部位
+
+## 安全檔案
+
+以下檔案不應提交到 GitHub：
+
+- `.env`
+- `.streamlit/secrets.toml`
+- `data/trading.db`
+
+可參考 `.env.example` 與 `.streamlit/secrets.toml.example` 建立自己的設定。
