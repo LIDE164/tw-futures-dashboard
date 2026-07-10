@@ -61,6 +61,24 @@ python signal_worker.py --interval 30
 python signal_worker.py --once
 ```
 
+Windows 本機建議使用專案附的 PowerShell 腳本，它會自動建立 `.venv` 並安裝 `requirements.txt`：
+
+```powershell
+.\run_worker.ps1 -Once
+```
+
+常駐執行：
+
+```powershell
+.\run_worker.ps1 -Interval 30
+```
+
+如果 PowerShell 不允許執行腳本，可先在同一個 Terminal 執行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
 目前功能：
 
 - 只使用完整 15 分 K 產生進場 / 平倉訊號

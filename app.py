@@ -3,8 +3,8 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+import charting
 from backtester import run_backtest
-from charting import PLOT_CONFIG, build_daily_chart, build_signal_chart, prepare_daily_chart
 from indicators import build_tech_data
 from market_session import TAIPEI, format_datetime, get_market_status
 from market_data import get_public_market_data
@@ -36,6 +36,16 @@ PRODUCT_ROOT = getattr(sinopac_api, "DEFAULT_FUTURES_ROOT", "TMF")
 CONTRACT_MULTIPLIER = 10
 DEFAULT_QUANTITY = 1
 SIGNAL_TIMEFRAME = "15min"
+PLOT_CONFIG = getattr(
+    charting,
+    "PLOT_CONFIG",
+    {
+        "displayModeBar": False,
+        "scrollZoom": False,
+        "doubleClick": False,
+        "responsive": True,
+    },
+)
 
 
 def format_contracts(value):
@@ -207,6 +217,42 @@ def get_micro_kbars_safe(api):
         return df, f"{warning} {error or ''}".strip()
 
     return pd.DataFrame(), "sinopac_api.py 缺少 K 線讀取函式。"
+
+
+def prepare_daily_chart_safe(kbars):
+    func = getattr(charting, "prepare_daily_chart", None)
+    if func:
+        return func(kbars)
+
+    if kbars is None or kbars.empty or "ts" not in kbars.columns:
+        return pd.DataFrame()
+    required = {"Open", "High", "Low", "Close", "Volume"}
+    if not required.issubset(set(kbars.columns)):
+        return pd.DataFrame()
+
+    df = kbars.copy()
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    daily = (
+        df.dropna(subset=["ts"])
+        .set_index("ts")
+        .resample("1D")
+        .agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"})
+        .dropna()
+    )
+    daily["MA5"] = daily["Close"].rolling(5).mean()
+    daily["MA10"] = daily["Close"].rolling(10).mean()
+    daily["MA20"] = daily["Close"].rolling(20).mean()
+    return daily.tail(35).reset_index()
+
+
+def build_daily_chart_safe(kbars):
+    func = getattr(charting, "build_daily_chart", None)
+    return func(kbars) if func else None
+
+
+def build_signal_chart_safe(kbars, trade_plan):
+    func = getattr(charting, "build_signal_chart", None)
+    return func(kbars, trade_plan) if func else None
 
 
 def action_to_text(action, paper_position=0):
@@ -706,11 +752,11 @@ with st.container(border=True):
         horizontal=True,
         label_visibility="collapsed",
     )
-    fig = build_daily_chart(raw_kbars) if chart_mode == "近一月趨勢" else build_signal_chart(kbars, trade_plan)
+    fig = build_daily_chart_safe(raw_kbars) if chart_mode == "近一月趨勢" else build_signal_chart_safe(kbars, trade_plan)
     if fig is not None:
         st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
     elif chart_mode == "近一月趨勢" and raw_kbars is not None and not raw_kbars.empty:
-        daily = prepare_daily_chart(raw_kbars)
+        daily = prepare_daily_chart_safe(raw_kbars)
         chart_df = daily.set_index("ts")[["Close", "MA5", "MA10", "MA20"]].dropna(how="all") if not daily.empty else pd.DataFrame()
         if chart_df.empty:
             st.info("尚無足夠日 K 資料可繪圖。")
@@ -719,7 +765,7 @@ with st.container(border=True):
             st.caption("目前環境未安裝 Plotly，先以收盤線替代 K 線圖。")
     elif kbars is not None and not kbars.empty and "Close" in kbars.columns:
         if chart_mode == "近一月趨勢":
-            daily = prepare_daily_chart(raw_kbars)
+            daily = prepare_daily_chart_safe(raw_kbars)
             chart_df = daily.set_index("ts")[["Close", "MA5", "MA10", "MA20"]].dropna(how="all") if not daily.empty else pd.DataFrame()
         else:
             chart_df = kbars.tail(80).set_index("ts")[["Close"]]
