@@ -18,6 +18,11 @@ def get_decision_score(data, fund_data=None, inst_data=None, with_reason=False):
     score_delta = 0
     reasons = []
 
+    if not data.get("可評分", True):
+        reasons.append("技術資料不足，暫不產生方向分數")
+        result = (50, "資料不足", reasons, "等待資料")
+        return result if with_reason else (50, "資料不足", "等待資料")
+
     adx = _to_float(data.get("ADX"))
     close = _to_float(data.get("收盤價"))
     bb_dn = _to_float(data.get("BB_DN"))

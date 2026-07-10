@@ -84,6 +84,7 @@ def build_tech_data(df, realtime=None):
         "ADX": _adx(high, low, close),
         "回測有撐": bool(latest_bb_dn > 0 and latest_close > latest_bb_dn),
         "資料狀態": "永豐 kbars",
+        "可評分": True,
     }
 
 
@@ -103,4 +104,5 @@ def fallback_tech_data(realtime=None, reason="尚未取得足夠歷史資料"):
         "ADX": 0.0,
         "回測有撐": False,
         "資料狀態": reason,
+        "可評分": False,
     }

@@ -7,6 +7,7 @@ from scraper import get_taifex_institutional_oi
 from sinopac_api import (
     activate_ca_from_env,
     get_api,
+    get_connection_status,
     get_fut_positions,
     get_recent_txf_kbars,
     get_simulation_default,
@@ -45,6 +46,8 @@ with st.sidebar:
     simulation_mode = st.checkbox("使用模擬模式", value=get_simulation_default())
     sj_api_key = st.text_input("SJ API Key", type="password", help="可改用 Streamlit secrets 或環境變數 SJ_API_KEY")
     sj_secret_key = st.text_input("SJ Secret Key", type="password", help="可改用 Streamlit secrets 或環境變數 SJ_SECRET_KEY")
+    if simulation_mode:
+        st.info("若使用正式永豐 API Key 仍收不到行情或帳務資料，請先取消「使用模擬模式」再重新整理。")
 
     st.divider()
     st.subheader("策略風控")
@@ -74,10 +77,10 @@ api, api_error = get_api(
 with st.spinner("更新市場資料中..."):
     oi_data = load_oi_data(finmind_token)
     realtime = get_realtime_data(api)
-    kbars = get_recent_txf_kbars(api)
+    kbars, kbars_error = get_recent_txf_kbars(api)
 
 
-for warning in (api_error, oi_data.get("error"), realtime.get("error")):
+for warning in (api_error, oi_data.get("error"), realtime.get("error"), kbars_error):
     if warning:
         st.warning(warning)
 
@@ -106,7 +109,7 @@ top1, top2, top3, top4 = st.columns(4)
 top1.metric("綜合評分", score, label)
 top2.metric("型態特徵", feature)
 top3.metric("盤中均價線", f"{realtime['vwap']:,.0f}" if realtime["vwap"] else "無資料")
-top4.metric("台指 VIX", realtime["vix"], "結構穩定", delta_color="off")
+top4.metric("台指 VIX", "未接資料源")
 
 if action == "HOLD":
     st.info(f"AI 策略指令：{action}\n\n{msg}")
@@ -120,15 +123,28 @@ tab_diag, tab_chips, tab_options, tab_account = st.tabs(["綜合診斷", "法人
 with tab_diag:
     st.subheader("評分明細")
     st.caption(f"技術資料狀態：{tech_data.get('資料狀態', '未知')}")
+    with st.expander("永豐連線診斷", expanded=False):
+        st.json(get_connection_status(api, simulation_mode))
+        st.write(
+            {
+                "snapshot_source": realtime.get("source"),
+                "snapshot_updated_at": realtime.get("updated_at"),
+                "snapshot_error": realtime.get("error"),
+                "kbars_rows": len(kbars),
+                "kbars_contract": kbars.attrs.get("contract_code", "") if hasattr(kbars, "attrs") else "",
+                "kbars_error": kbars_error,
+            }
+        )
+
     if reasons:
         st.table({"因素": reasons})
     else:
         st.write("目前沒有明確加減分因素。")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("散戶小台多空比", "-15.2%", "偏多軋空")
+    c1.metric("散戶小台多空比", "未接資料源")
     c2.metric("成交量", f"{realtime['volume']:,.0f}")
-    c3.metric("選擇權 P/C Ratio", "115%", "支撐強")
+    c3.metric("選擇權 P/C Ratio", "未接資料源")
 
 with tab_chips:
     st.subheader("三大法人期貨未平倉")
@@ -141,9 +157,7 @@ with tab_chips:
 
 with tab_options:
     st.subheader("選擇權最大未平倉量")
-    col_call, col_put = st.columns(2)
-    col_call.metric("Call 壓力", "23,500", "-壓力", delta_color="inverse")
-    col_put.metric("Put 支撐", "22,800", "+支撐")
+    st.info("此頁原本的 Call 壓力、Put 支撐是硬寫假資料，已移除。下一步需要串接 TAIFEX 選擇權未平倉或永豐選擇權商品資料後再顯示。")
 
 with tab_account:
     st.subheader("永豐真實期貨部位 / 未實現損益")

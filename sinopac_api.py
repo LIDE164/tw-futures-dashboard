@@ -106,6 +106,49 @@ def get_txf_contract(api, contract_code="TXFR1"):
     raise RuntimeError("找不到台指期近月連續契約 TXFR1/TXFR2。")
 
 
+def _iter_contracts(container):
+    try:
+        return list(container)
+    except TypeError:
+        pass
+
+    contracts = []
+    for value in getattr(container, "__dict__", {}).values():
+        code = getattr(value, "code", "")
+        if code:
+            contracts.append(value)
+    return contracts
+
+
+def get_txf_kbar_contract(api):
+    if api is None:
+        raise RuntimeError("尚未登入永豐 API。")
+
+    today = datetime.now().strftime("%Y/%m/%d")
+    contracts = []
+    for contract in _iter_contracts(api.Contracts.Futures.TXF):
+        code = getattr(contract, "code", "")
+        delivery_date = getattr(contract, "delivery_date", "") or "9999/99/99"
+
+        if not code.startswith("TXF") or code.startswith("TXFR"):
+            continue
+        if delivery_date and delivery_date < today:
+            continue
+
+        contracts.append(contract)
+
+    if contracts:
+        return sorted(
+            contracts,
+            key=lambda item: (
+                getattr(item, "delivery_date", "") or "9999/99/99",
+                getattr(item, "code", ""),
+            ),
+        )[0]
+
+    return get_txf_contract(api, "TXFR1")
+
+
 def _first_price(*values):
     for value in values:
         try:
@@ -172,27 +215,48 @@ def get_realtime_data_from_sinopac(api, contract_code="TXFR1"):
         }
 
 
-def get_recent_txf_kbars(api, contract_code="TXFR1", days=60):
+def get_recent_txf_kbars(api, days=60):
     if api is None:
-        return pd.DataFrame()
+        return pd.DataFrame(), "尚未登入永豐 API。"
 
     try:
-        contract = get_txf_contract(api, contract_code)
+        contract = get_txf_kbar_contract(api)
         end = datetime.now().date()
         start = end - timedelta(days=days)
         kbars = api.kbars(contract, start=str(start), end=str(end))
         df = pd.DataFrame({key: value for key, value in kbars.items()})
 
         if df.empty:
-            return df
+            return df, f"永豐 kbars 無資料，使用契約：{getattr(contract, 'code', 'UNKNOWN')}。"
 
         if "ts" in df.columns:
             df["ts"] = pd.to_datetime(df["ts"])
             df = df.sort_values("ts")
 
-        return df
-    except Exception:
-        return pd.DataFrame()
+        df.attrs["contract_code"] = getattr(contract, "code", "")
+        return df, None
+    except Exception as exc:
+        return pd.DataFrame(), f"永豐 kbars 讀取失敗：{exc}"
+
+
+def get_connection_status(api, simulation=True):
+    if api is None:
+        return {
+            "登入": "未登入",
+            "模式": "模擬" if simulation else "正式",
+            "期貨帳號": "無",
+            "商品檔": "無",
+        }
+
+    futopt_account = getattr(api, "futopt_account", None)
+    contracts_status = getattr(getattr(api, "Contracts", None), "status", None)
+
+    return {
+        "登入": "成功",
+        "模式": "模擬" if simulation else "正式",
+        "期貨帳號": "有" if futopt_account else "無",
+        "商品檔": str(contracts_status) if contracts_status is not None else "未知",
+    }
 
 
 def get_fut_positions(api):
