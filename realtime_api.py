@@ -6,6 +6,12 @@ DEFAULT_FUTURES_ROOT = getattr(sinopac_api, "DEFAULT_FUTURES_ROOT", "TMF")
 
 DEFAULT_MARKET_DATA = {
     "current_price": 0.0,
+    "last_price": 0.0,
+    "bid_price": 0.0,
+    "ask_price": 0.0,
+    "bid_volume": 0,
+    "ask_volume": 0,
+    "spread": 0.0,
     "volume": 0,
     "vix": 0.0,
     "vwap": 0.0,

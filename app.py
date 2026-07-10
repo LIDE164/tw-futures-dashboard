@@ -5,10 +5,12 @@ import streamlit as st
 
 import sinopac_api
 from backtester import run_backtest
+from charting import build_signal_chart
 from indicators import build_tech_data
 from market_session import TAIPEI, format_datetime, get_market_status
 from market_data import get_public_market_data
 from paper_broker import PaperBroker
+from risk_manager import evaluate_entry_risk
 from scoring import get_decision_score
 from storage import clear_paper_broker_state, restore_paper_broker_state, save_paper_broker_state
 from strategy import StrategyManager
@@ -153,6 +155,12 @@ def has_credentials_safe(api_key="", secret_key=""):
 def get_realtime_data_safe(api, product_root=PRODUCT_ROOT):
     default_data = {
         "current_price": 0.0,
+        "last_price": 0.0,
+        "bid_price": 0.0,
+        "ask_price": 0.0,
+        "bid_volume": 0,
+        "ask_volume": 0,
+        "spread": 0.0,
         "volume": 0,
         "vwap": 0.0,
         "vix": 0.0,
@@ -245,15 +253,25 @@ def summarize_reasons(reasons, fallback_message, limit=3):
     return plain_reasons[:limit]
 
 
-def estimated_fill_price(action, price, slippage_points):
+def estimated_fill_price(action, price, slippage_points, realtime=None):
+    realtime = realtime or {}
     if action == "BUY_LONG":
-        return price + slippage_points
+        return float(realtime.get("ask_price") or 0) or price + slippage_points
     if action == "SELL_SHORT":
-        return price - slippage_points
+        return float(realtime.get("bid_price") or 0) or price - slippage_points
     return price
 
 
-def build_trade_plan(action, current_price, strategy, paper_broker, system_mode, market_status, slippage_points=0.0):
+def build_trade_plan(
+    action,
+    current_price,
+    strategy,
+    paper_broker,
+    system_mode,
+    market_status,
+    realtime=None,
+    slippage_points=0.0,
+):
     stop_gap = float(strategy.stop_loss_points)
     reward_gap = float(strategy.take_profit_points)
     has_paper_position = system_mode in {"模擬盤模式", "實盤觀察模式"} and paper_broker.position != 0
@@ -304,7 +322,7 @@ def build_trade_plan(action, current_price, strategy, paper_broker, system_mode,
         return plan
 
     if action == "BUY_LONG":
-        fill_price = estimated_fill_price(action, current_price, slippage_points)
+        fill_price = estimated_fill_price(action, current_price, slippage_points, realtime)
         plan.update(
             {
                 "summary": "目前偏多，若要進場，請用做多計畫控管風險。",
@@ -315,7 +333,7 @@ def build_trade_plan(action, current_price, strategy, paper_broker, system_mode,
             }
         )
     elif action == "SELL_SHORT":
-        fill_price = estimated_fill_price(action, current_price, slippage_points)
+        fill_price = estimated_fill_price(action, current_price, slippage_points, realtime)
         plan.update(
             {
                 "summary": "目前偏空，若要進場，請用做空計畫控管風險。",
@@ -560,8 +578,17 @@ trade_plan = build_trade_plan(
     active_broker,
     system_mode,
     market_status,
+    realtime,
     slippage_points,
 )
+risk_decision = evaluate_entry_risk(action, paper_broker, market_status)
+if action in {"BUY_LONG", "SELL_SHORT"} and not risk_decision.allowed:
+    trade_plan["title"] = "訊號成立｜風控禁止進場"
+    trade_plan["summary"] = "策略訊號成立，但目前新手風控規則禁止進場。"
+    trade_plan["entry_price"] = None
+    trade_plan["stop_loss"] = None
+    trade_plan["take_profit"] = None
+    trade_plan["close_rule"] = "請先遵守風控，等待下一根完整 15 分 K 或隔日重新評估。"
 tone = "info" if not market_status.is_open and active_broker.position == 0 else signal_state(
     action,
     active_broker.position if system_mode in {"模擬盤模式", "實盤觀察模式"} else 0,
@@ -599,6 +626,11 @@ with st.container(border=True):
     price_col.metric("目前價格" if market_status.is_open else "最近價格", format_price(current_price))
     action_col.metric("操作方向", trade_plan["title"])
 
+    bid_col, ask_col, spread_col = st.columns(3)
+    bid_col.metric("買一", format_price(realtime.get("bid_price")))
+    ask_col.metric("賣一", format_price(realtime.get("ask_price")))
+    spread_col.metric("價差", format_price(realtime.get("spread")))
+
     signal_message = f"{trade_plan['summary']}\n\n補充：{msg}"
     if tone == "success":
         st.success(signal_message)
@@ -610,6 +642,10 @@ with st.container(border=True):
     st.write("為什麼這樣建議")
     for item in plain_reasons:
         st.write(f"- {item}")
+    if risk_decision.reasons:
+        st.write("風控原因")
+        for item in risk_decision.reasons:
+            st.write(f"- {item}")
 
 with st.container(border=True):
     st.subheader("交易計畫")
@@ -623,6 +659,25 @@ with st.container(border=True):
     risk_col, cost_col = st.columns(2)
     risk_col.metric("每口最大預估虧損", format_money(max_loss_per_contract))
     cost_col.metric("預估來回成本", format_money(estimated_cost))
+
+with st.container(border=True):
+    st.subheader("風控狀態")
+    r1, r2, r3 = st.columns(3)
+    r1.metric("今日新進場", f"{risk_decision.daily_trades}/3")
+    r2.metric("今日已實現", format_money(risk_decision.daily_pnl))
+    r3.metric("連續虧損", f"{risk_decision.consecutive_losses}/2")
+
+with st.container(border=True):
+    st.subheader("15 分 K 線")
+    fig = build_signal_chart(kbars, trade_plan)
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True)
+    elif kbars is not None and not kbars.empty and "Close" in kbars.columns:
+        chart_df = kbars.tail(80).set_index("ts")[["Close"]]
+        st.line_chart(chart_df)
+        st.caption("目前環境未安裝 Plotly，先以收盤線替代 K 線圖。")
+    else:
+        st.info("尚無足夠 K 線資料可繪圖。")
 
 with st.expander("進階摘要", expanded=False):
     sum1, sum2 = st.columns(2)
@@ -682,7 +737,11 @@ elif page == "模擬部位":
     p3.metric("已實現損益", f"{paper_broker.realized_pnl:,.0f}")
     p4.metric("未實現損益", f"{paper_broker.unrealized_pnl(current_price):,.0f}")
 
-    can_paper_execute = market_status.is_open and action in {"BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT"}
+    can_paper_execute = (
+        market_status.is_open
+        and risk_decision.allowed
+        and action in {"BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT"}
+    )
     col_exec, col_reset = st.columns(2)
     with col_exec:
         if st.button(

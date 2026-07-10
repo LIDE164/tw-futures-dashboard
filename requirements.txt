@@ -5,3 +5,4 @@ yfinance
 lxml
 shioaji
 python-dotenv
+plotly

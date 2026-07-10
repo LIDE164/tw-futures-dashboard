@@ -261,6 +261,12 @@ def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contr
     if api is None:
         return {
             "current_price": 0.0,
+            "last_price": 0.0,
+            "bid_price": 0.0,
+            "ask_price": 0.0,
+            "bid_volume": 0,
+            "ask_volume": 0,
+            "spread": 0.0,
             "volume": 0,
             "vwap": 0.0,
             "vix": 0.0,
@@ -278,6 +284,12 @@ def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contr
         if not snapshots:
             return {
                 "current_price": 0.0,
+                "last_price": 0.0,
+                "bid_price": 0.0,
+                "ask_price": 0.0,
+                "bid_volume": 0,
+                "ask_volume": 0,
+                "spread": 0.0,
                 "volume": 0,
                 "vwap": 0.0,
                 "vix": 0.0,
@@ -291,14 +303,25 @@ def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contr
             }
 
         snapshot = snapshots[0]
+        bid_price = _first_price(getattr(snapshot, "buy_price", 0), getattr(snapshot, "bid_price", 0))
+        ask_price = _first_price(getattr(snapshot, "sell_price", 0), getattr(snapshot, "ask_price", 0))
+        bid_volume = int(_first_price(getattr(snapshot, "buy_volume", 0), getattr(snapshot, "bid_volume", 0)))
+        ask_volume = int(_first_price(getattr(snapshot, "sell_volume", 0), getattr(snapshot, "ask_volume", 0)))
         close = _first_price(
             getattr(snapshot, "close", 0),
-            getattr(snapshot, "buy_price", 0),
-            getattr(snapshot, "sell_price", 0),
+            bid_price,
+            ask_price,
         )
+        spread = ask_price - bid_price if ask_price > 0 and bid_price > 0 else 0.0
 
         return {
             "current_price": close,
+            "last_price": close,
+            "bid_price": bid_price,
+            "ask_price": ask_price,
+            "bid_volume": bid_volume,
+            "ask_volume": ask_volume,
+            "spread": spread,
             "volume": int(_first_price(getattr(snapshot, "total_volume", 0), getattr(snapshot, "volume", 0))),
             "vwap": _first_price(getattr(snapshot, "average_price", 0), close),
             "vix": 0.0,
@@ -313,6 +336,12 @@ def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contr
     except Exception as exc:
         return {
             "current_price": 0.0,
+            "last_price": 0.0,
+            "bid_price": 0.0,
+            "ask_price": 0.0,
+            "bid_volume": 0,
+            "ask_volume": 0,
+            "spread": 0.0,
             "volume": 0,
             "vwap": 0.0,
             "vix": 0.0,
