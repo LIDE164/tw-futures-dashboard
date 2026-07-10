@@ -11,16 +11,13 @@ from market_data import get_public_market_data
 from paper_broker import PaperBroker
 from risk_manager import evaluate_entry_risk
 from scoring import get_decision_score
-from storage import (
-    clear_paper_broker_state,
-    get_recent_alerts,
-    get_recent_signals,
-    get_worker_heartbeat,
-    restore_paper_broker_state,
-    save_paper_broker_state,
-)
 from strategy import StrategyManager
 import sinopac_api
+
+try:
+    import storage
+except Exception:
+    storage = None
 
 
 st.set_page_config(
@@ -167,6 +164,38 @@ def get_simulation_default_safe():
 def has_credentials_safe(api_key="", secret_key=""):
     checker = getattr(sinopac_api, "has_credentials", None)
     return checker(api_key, secret_key) if checker else bool(api_key and secret_key)
+
+
+def restore_paper_broker_state_safe(broker):
+    func = getattr(storage, "restore_paper_broker_state", None)
+    return func(broker) if func else broker
+
+
+def save_paper_broker_state_safe(broker):
+    func = getattr(storage, "save_paper_broker_state", None)
+    if func:
+        func(broker)
+
+
+def clear_paper_broker_state_safe():
+    func = getattr(storage, "clear_paper_broker_state", None)
+    if func:
+        func()
+
+
+def get_worker_heartbeat_safe():
+    func = getattr(storage, "get_worker_heartbeat", None)
+    return func() if func else {}
+
+
+def get_recent_signals_safe(limit=20):
+    func = getattr(storage, "get_recent_signals", None)
+    return func(limit) if func else []
+
+
+def get_recent_alerts_safe(limit=20):
+    func = getattr(storage, "get_recent_alerts", None)
+    return func(limit) if func else []
 
 
 def get_realtime_data_safe(api, product_root=PRODUCT_ROOT):
@@ -575,7 +604,7 @@ if "paper_broker" not in st.session_state:
         commission_per_side=commission_per_side,
         slippage_points=slippage_points,
     )
-    restore_paper_broker_state(st.session_state.paper_broker)
+    restore_paper_broker_state_safe(st.session_state.paper_broker)
 
 paper_broker = st.session_state.paper_broker
 paper_broker.multiplier = contract_multiplier
@@ -793,7 +822,7 @@ if page == "新手首頁":
 elif page == "警報服務":
     st.subheader("背景警報服務")
     st.caption("signal_worker.py 需在另一個行程常駐執行；Streamlit 只顯示狀態與紀錄。")
-    heartbeat = get_worker_heartbeat()
+    heartbeat = get_worker_heartbeat_safe()
     if heartbeat:
         h1, h2 = st.columns(2)
         h1.metric("Worker 狀態", heartbeat.get("status", "未知"))
@@ -805,14 +834,14 @@ elif page == "警報服務":
     st.write("啟動指令")
     st.code("python signal_worker.py --interval 30", language="bash")
 
-    recent_signals = get_recent_signals(20)
+    recent_signals = get_recent_signals_safe(20)
     st.subheader("最近訊號")
     if recent_signals:
         st.dataframe(pd.DataFrame(recent_signals), use_container_width=True)
     else:
         st.info("尚無訊號紀錄。")
 
-    recent_alerts = get_recent_alerts(20)
+    recent_alerts = get_recent_alerts_safe(20)
     st.subheader("最近警報")
     if recent_alerts:
         st.dataframe(pd.DataFrame(recent_alerts), use_container_width=True)
@@ -889,7 +918,7 @@ elif page == "模擬部位":
                     trade_plan["stop_loss"] or 0,
                     trade_plan["take_profit"] or 0,
                 )
-                save_paper_broker_state(paper_broker)
+                save_paper_broker_state_safe(paper_broker)
                 st.success(fill_msg)
                 st.rerun()
             else:
@@ -898,7 +927,7 @@ elif page == "模擬部位":
         if st.button("重置模擬帳本", use_container_width=True):
             paper_broker.reset()
             st.session_state.strategy.reset()
-            clear_paper_broker_state()
+            clear_paper_broker_state_safe()
             st.rerun()
 
     trades_df = paper_broker.trades_df()
