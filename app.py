@@ -1,3 +1,6 @@
+from datetime import datetime
+
+import pandas as pd
 import streamlit as st
 
 from backtester import run_backtest
@@ -7,10 +10,11 @@ from paper_broker import PaperBroker
 from realtime_api import get_realtime_data
 from scoring import get_decision_score
 from sinopac_api import (
+    DEFAULT_FUTURES_ROOT,
     get_api,
     get_connection_status,
     get_fut_positions,
-    get_recent_txf_kbars,
+    get_recent_micro_txf_kbars,
     get_simulation_default,
     has_credentials,
 )
@@ -23,6 +27,13 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
+
+
+PRODUCT_NAME = "微型臺指近月"
+PRODUCT_ROOT = DEFAULT_FUTURES_ROOT
+CONTRACT_MULTIPLIER = 10
+DEFAULT_QUANTITY = 1
+SIGNAL_TIMEFRAME = "15min"
 
 
 def format_contracts(value):
@@ -45,6 +56,68 @@ def format_optional_number(value, suffix=""):
 
 def format_price(value):
     return f"{float(value):,.0f}" if value else "無資料"
+
+
+def format_money(value):
+    return f"NT$ {float(value):,.0f}" if value not in (None, "") else "無資料"
+
+
+def resample_signal_kbars(df, rule=SIGNAL_TIMEFRAME):
+    if df is None or df.empty or "ts" not in df.columns:
+        return df
+
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    if any(column not in df.columns for column in required):
+        return df
+
+    out = df.copy()
+    out["ts"] = pd.to_datetime(out["ts"], errors="coerce")
+    out = (
+        out.dropna(subset=["ts"])
+        .set_index("ts")
+        .resample(rule)
+        .agg(
+            {
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+                "Volume": "sum",
+            }
+        )
+        .dropna()
+        .reset_index()
+    )
+    out.attrs.update(df.attrs)
+    out.attrs["signal_timeframe"] = rule
+    return out
+
+
+def latest_completed_bar_text(df):
+    if df is None or df.empty or "ts" not in df.columns:
+        return "無資料"
+    latest_ts = pd.to_datetime(df["ts"], errors="coerce").dropna()
+    if latest_ts.empty:
+        return "無資料"
+    return latest_ts.iloc[-1].strftime("%H:%M")
+
+
+def data_age_seconds(updated_at):
+    if not updated_at:
+        return None
+    try:
+        updated = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+        return max(0, int((datetime.now() - updated).total_seconds()))
+    except ValueError:
+        return None
+
+
+def data_freshness_label(age_seconds):
+    if age_seconds is None:
+        return "未知"
+    if age_seconds <= 30:
+        return f"即時，{age_seconds} 秒前"
+    return f"可能過期，{age_seconds} 秒前"
 
 
 def empty_institutional_data(error=None):
@@ -123,9 +196,17 @@ def summarize_reasons(reasons, fallback_message, limit=3):
     return plain_reasons[:limit]
 
 
-def build_trade_plan(action, current_price, strategy, paper_broker, system_mode):
+def estimated_fill_price(action, price, slippage_points):
+    if action == "BUY_LONG":
+        return price + slippage_points
+    if action == "SELL_SHORT":
+        return price - slippage_points
+    return price
+
+
+def build_trade_plan(action, current_price, strategy, paper_broker, system_mode, slippage_points=0.0):
     stop_gap = float(strategy.stop_loss_points)
-    reward_gap = stop_gap * 2
+    reward_gap = float(strategy.take_profit_points)
     has_paper_position = system_mode == "模擬盤模式" and paper_broker.position != 0
     entry_price = paper_broker.entry_price if has_paper_position else current_price
 
@@ -139,23 +220,25 @@ def build_trade_plan(action, current_price, strategy, paper_broker, system_mode)
     }
 
     if action == "BUY_LONG":
+        fill_price = estimated_fill_price(action, current_price, slippage_points)
         plan.update(
             {
                 "summary": "目前偏多，若要進場，請用做多計畫控管風險。",
-                "entry_price": current_price,
-                "stop_loss": current_price - stop_gap,
-                "take_profit": current_price + reward_gap,
-                "close_rule": f"跌破 {current_price - stop_gap:,.0f} 或評分跌破 {strategy.long_exit_score} 分就先平倉。",
+                "entry_price": fill_price,
+                "stop_loss": fill_price - stop_gap,
+                "take_profit": fill_price + reward_gap,
+                "close_rule": f"跌破 {fill_price - stop_gap:,.0f}、碰到 {fill_price + reward_gap:,.0f}，或評分跌破 {strategy.long_exit_score} 分就先平倉。",
             }
         )
     elif action == "SELL_SHORT":
+        fill_price = estimated_fill_price(action, current_price, slippage_points)
         plan.update(
             {
                 "summary": "目前偏空，若要進場，請用做空計畫控管風險。",
-                "entry_price": current_price,
-                "stop_loss": current_price + stop_gap,
-                "take_profit": current_price - reward_gap,
-                "close_rule": f"漲破 {current_price + stop_gap:,.0f} 或評分升破 {strategy.short_exit_score} 分就先回補。",
+                "entry_price": fill_price,
+                "stop_loss": fill_price + stop_gap,
+                "take_profit": fill_price - reward_gap,
+                "close_rule": f"漲破 {fill_price + stop_gap:,.0f}、碰到 {fill_price - reward_gap:,.0f}，或評分升破 {strategy.short_exit_score} 分就先回補。",
             }
         )
     elif action == "CLOSE_LONG":
@@ -181,9 +264,9 @@ def build_trade_plan(action, current_price, strategy, paper_broker, system_mode)
             {
                 "summary": "模擬帳本目前持有多單，先照原計畫觀察。",
                 "entry_price": paper_broker.entry_price,
-                "stop_loss": paper_broker.entry_price - stop_gap,
-                "take_profit": paper_broker.entry_price + reward_gap,
-                "close_rule": f"跌破 {paper_broker.entry_price - stop_gap:,.0f} 或評分跌破 {strategy.long_exit_score} 分就先平倉。",
+                "stop_loss": paper_broker.stop_loss_price or paper_broker.entry_price - stop_gap,
+                "take_profit": paper_broker.take_profit_price or paper_broker.entry_price + reward_gap,
+                "close_rule": f"跌破 {paper_broker.stop_loss_price or paper_broker.entry_price - stop_gap:,.0f}、碰到 {paper_broker.take_profit_price or paper_broker.entry_price + reward_gap:,.0f}，或評分跌破 {strategy.long_exit_score} 分就先平倉。",
             }
         )
     elif has_paper_position and paper_broker.position < 0:
@@ -191,9 +274,9 @@ def build_trade_plan(action, current_price, strategy, paper_broker, system_mode)
             {
                 "summary": "模擬帳本目前持有空單，先照原計畫觀察。",
                 "entry_price": paper_broker.entry_price,
-                "stop_loss": paper_broker.entry_price + stop_gap,
-                "take_profit": paper_broker.entry_price - reward_gap,
-                "close_rule": f"漲破 {paper_broker.entry_price + stop_gap:,.0f} 或評分升破 {strategy.short_exit_score} 分就先回補。",
+                "stop_loss": paper_broker.stop_loss_price or paper_broker.entry_price + stop_gap,
+                "take_profit": paper_broker.take_profit_price or paper_broker.entry_price - reward_gap,
+                "close_rule": f"漲破 {paper_broker.stop_loss_price or paper_broker.entry_price + stop_gap:,.0f}、碰到 {paper_broker.take_profit_price or paper_broker.entry_price - reward_gap:,.0f}，或評分升破 {strategy.short_exit_score} 分就先回補。",
             }
         )
 
@@ -205,11 +288,12 @@ def load_public_market_data():
     return get_public_market_data()
 
 
-def configure_strategy(strategy, long_entry_score, short_entry_score, stop_loss_points):
+def configure_strategy(strategy, long_entry_score, short_entry_score, stop_loss_points, take_profit_points):
     strategy.update_config(
         long_entry_score=long_entry_score,
         short_entry_score=short_entry_score,
         stop_loss_points=stop_loss_points,
+        take_profit_points=take_profit_points,
     )
 
 
@@ -232,16 +316,19 @@ with st.sidebar:
 
     st.divider()
     st.subheader("策略參數")
+    st.caption(f"商品固定：{PRODUCT_NAME}｜訊號週期：15 分鐘｜模擬口數固定 1 口")
     long_entry_score = st.slider("多單進場分數", 50, 80, 60)
     short_entry_score = st.slider("空單進場分數", 20, 50, 40)
     stop_loss_points = st.number_input("停損點數", min_value=10, max_value=300, value=50, step=10)
+    take_profit_points = st.number_input("停利點數", min_value=10, max_value=600, value=100, step=10)
 
     st.divider()
     st.subheader("模擬 / 回測成本")
-    contract_multiplier = st.selectbox("契約乘數", [200, 50, 10], index=0, help="大台 200，小台 50，微台 10")
-    paper_quantity = st.number_input("口數", min_value=1, max_value=20, value=1, step=1)
-    slippage_points = st.number_input("滑價點數", min_value=0.0, max_value=20.0, value=1.0, step=0.5)
-    commission_per_side = st.number_input("單邊手續費", min_value=0.0, max_value=500.0, value=0.0, step=1.0)
+    contract_multiplier = CONTRACT_MULTIPLIER
+    paper_quantity = DEFAULT_QUANTITY
+    st.caption(f"微型臺指固定乘數：每點 {CONTRACT_MULTIPLIER} 元｜口數：{DEFAULT_QUANTITY} 口")
+    slippage_points = st.number_input("滑價點數", min_value=1.0, max_value=20.0, value=2.0, step=0.5)
+    commission_per_side = st.number_input("單邊手續費", min_value=1.0, max_value=500.0, value=20.0, step=1.0)
 
     if st.button("重新整理資料", use_container_width=True):
         st.cache_data.clear()
@@ -268,8 +355,9 @@ with st.spinner("更新市場資料中..."):
         "txf_institutional",
         empty_institutional_data("TAIFEX 法人籌碼資料尚未載入，請重新部署或清除快取後再試。"),
     )
-    realtime = get_realtime_data(api)
-    kbars, kbars_error = get_recent_txf_kbars(api)
+    realtime = get_realtime_data(api, product_root=PRODUCT_ROOT)
+    raw_kbars, kbars_error = get_recent_micro_txf_kbars(api)
+    kbars = resample_signal_kbars(raw_kbars, SIGNAL_TIMEFRAME)
 
 
 data_warnings = [
@@ -289,7 +377,13 @@ score, label, reasons, feature = get_decision_score(tech_data, inst_data=oi_data
 if "strategy" not in st.session_state:
     st.session_state.strategy = StrategyManager()
 
-configure_strategy(st.session_state.strategy, long_entry_score, short_entry_score, stop_loss_points)
+configure_strategy(
+    st.session_state.strategy,
+    long_entry_score,
+    short_entry_score,
+    stop_loss_points,
+    take_profit_points,
+)
 
 if "paper_broker" not in st.session_state:
     st.session_state.paper_broker = PaperBroker(
@@ -304,7 +398,12 @@ paper_broker.commission_per_side = commission_per_side
 paper_broker.slippage_points = slippage_points
 
 if system_mode == "模擬盤模式":
-    st.session_state.strategy.sync_position(paper_broker.position, paper_broker.entry_price)
+    st.session_state.strategy.sync_position(
+        paper_broker.position,
+        paper_broker.entry_price,
+        paper_broker.stop_loss_price,
+        paper_broker.take_profit_price,
+    )
 else:
     st.session_state.strategy.sync_position(0, 0.0)
 action, msg = st.session_state.strategy.decide_action(score, current_price)
@@ -320,11 +419,31 @@ elif paper_broker.position < 0 and system_mode == "模擬盤模式":
 
 
 plain_reasons = summarize_reasons(reasons, msg, limit=3)
-trade_plan = build_trade_plan(action, current_price, st.session_state.strategy, paper_broker, system_mode)
+trade_plan = build_trade_plan(
+    action,
+    current_price,
+    st.session_state.strategy,
+    paper_broker,
+    system_mode,
+    slippage_points,
+)
 tone = signal_state(action, paper_broker.position if system_mode == "模擬盤模式" else 0)
+age_seconds = data_age_seconds(realtime.get("updated_at"))
+max_loss_per_contract = stop_loss_points * CONTRACT_MULTIPLIER
+estimated_cost = commission_per_side * 2 + slippage_points * 2 * CONTRACT_MULTIPLIER
 
 st.title("期權戰情室")
-st.caption(f"資料來源：{realtime.get('source', 'fallback')}｜更新時間：{realtime.get('updated_at') or '備援資料'}｜模式：{system_mode}")
+contract_text = realtime.get("contract_code") or (kbars.attrs.get("contract_code", "") if hasattr(kbars, "attrs") else "")
+delivery_text = realtime.get("delivery_date") or (kbars.attrs.get("delivery_date", "") if hasattr(kbars, "attrs") else "")
+st.caption(
+    f"商品：{PRODUCT_NAME} {contract_text} {delivery_text}｜"
+    f"訊號週期：15 分鐘｜最近完成 K 棒：{latest_completed_bar_text(kbars)}｜"
+    f"資料狀態：{data_freshness_label(age_seconds)}"
+)
+st.caption(f"資料來源：{realtime.get('source', 'fallback')}｜模式：{system_mode}")
+
+if age_seconds is None or age_seconds > 30:
+    st.error("資料可能已過期，請先重新整理，不要直接依照舊畫面操作。")
 
 with st.container(border=True):
     st.subheader("現在建議")
@@ -353,6 +472,9 @@ with st.container(border=True):
     target_col.metric("目標平倉價", format_price(trade_plan["take_profit"]))
     close_col.write("平倉條件")
     close_col.write(trade_plan["close_rule"])
+    risk_col, cost_col = st.columns(2)
+    risk_col.metric("每口最大預估虧損", format_money(max_loss_per_contract))
+    cost_col.metric("預估來回成本", format_money(estimated_cost))
 
 with st.expander("進階摘要", expanded=False):
     sum1, sum2 = st.columns(2)
@@ -360,7 +482,7 @@ with st.expander("進階摘要", expanded=False):
     sum2.metric("型態特徵", feature)
     sum3, sum4 = st.columns(2)
     sum3.metric("盤中均價線", format_price(realtime.get("vwap")))
-    sum4.metric("30日年化波動", f"{volatility_30d:.1f}%" if volatility_30d else "無資料")
+    sum4.metric("近30根波動", f"{volatility_30d:.1f}%" if volatility_30d else "無資料")
 
 page = st.selectbox(
     "查看更多資訊",
@@ -420,9 +542,22 @@ elif page == "模擬部位":
             disabled=not can_paper_execute or system_mode != "模擬盤模式",
             use_container_width=True,
         ):
-            filled, fill_msg = paper_broker.execute(action, current_price, quantity=paper_quantity, note=msg)
+            filled, fill_msg = paper_broker.execute(
+                action,
+                current_price,
+                quantity=paper_quantity,
+                note=msg,
+                stop_loss_price=trade_plan["stop_loss"] or 0,
+                take_profit_price=trade_plan["take_profit"] or 0,
+            )
             if filled:
-                st.session_state.strategy.apply_fill(action, current_price, paper_quantity)
+                st.session_state.strategy.apply_fill(
+                    action,
+                    trade_plan["entry_price"] or current_price,
+                    paper_quantity,
+                    trade_plan["stop_loss"] or 0,
+                    trade_plan["take_profit"] or 0,
+                )
                 st.success(fill_msg)
                 st.rerun()
             else:
@@ -441,14 +576,14 @@ elif page == "模擬部位":
 
 elif page == "回測系統":
     st.subheader("回測系統")
-    st.caption("訊號以第 N 根 K 棒收盤資料計算，成交用第 N+1 根開盤價，避免偷看未來。")
+    st.caption("固定使用 15 分鐘 K。法人籌碼暫不納入歷史回測，避免用今日資料回填過去。")
 
-    if kbars.empty:
+    if raw_kbars.empty:
         st.warning("目前沒有足夠 K 線資料可回測。")
     else:
         trades, equity_curve, summary = run_backtest(
-            kbars,
-            inst_data=oi_data,
+            raw_kbars,
+            inst_data={},
             quantity=paper_quantity,
             multiplier=contract_multiplier,
             commission_per_side=commission_per_side,
@@ -456,6 +591,9 @@ elif page == "回測系統":
             long_entry_score=long_entry_score,
             short_entry_score=short_entry_score,
             stop_loss_points=stop_loss_points,
+            take_profit_points=take_profit_points,
+            signal_timeframe=SIGNAL_TIMEFRAME,
+            include_institutional=False,
         )
 
         if summary.get("error"):

@@ -1,4 +1,4 @@
-from sinopac_api import get_api, get_realtime_data_from_sinopac, get_simulation_default
+from sinopac_api import DEFAULT_FUTURES_ROOT, get_api, get_realtime_data_from_sinopac, get_simulation_default
 
 
 DEFAULT_MARKET_DATA = {
@@ -8,11 +8,13 @@ DEFAULT_MARKET_DATA = {
     "vwap": 0.0,
     "source": "Sinopac",
     "updated_at": None,
+    "contract_code": "",
+    "delivery_date": "",
     "error": None,
 }
 
 
-def get_realtime_data(api=None, simulation=None):
+def get_realtime_data(api=None, simulation=None, product_root=DEFAULT_FUTURES_ROOT):
     if api is None:
         api, login_error = get_api(
             simulation=get_simulation_default() if simulation is None else simulation
@@ -22,4 +24,4 @@ def get_realtime_data(api=None, simulation=None):
             data["error"] = login_error
             return data
 
-    return get_realtime_data_from_sinopac(api)
+    return get_realtime_data_from_sinopac(api, product_root=product_root)

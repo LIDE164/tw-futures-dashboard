@@ -89,7 +89,89 @@ def activate_ca_from_env(api):
         return False, f"CA 憑證啟用失敗：{exc}"
 
 
+DEFAULT_FUTURES_ROOT = "TMF"
+
+
+def _get_futures_group(api, product_root=DEFAULT_FUTURES_ROOT):
+    if api is None:
+        raise RuntimeError("尚未登入永豐 API。")
+
+    futures = getattr(api.Contracts, "Futures", None)
+    group = getattr(futures, product_root, None)
+    if group is None:
+        raise RuntimeError(f"找不到永豐商品檔中的 {product_root} 期貨契約。")
+    return group
+
+
+def get_futures_contract(api, product_root=DEFAULT_FUTURES_ROOT, contract_code=None):
+    group = _get_futures_group(api, product_root)
+
+    if contract_code:
+        contract = getattr(group, contract_code, None)
+        if contract:
+            return contract
+
+    continuous_codes = (f"{product_root}R1", f"{product_root}R2")
+    for fallback_code in continuous_codes:
+        contract = getattr(group, fallback_code, None)
+        if contract:
+            return contract
+
+    return get_near_month_futures_contract(api, product_root)
+
+
 def get_txf_contract(api, contract_code="TXFR1"):
+    return get_futures_contract(api, "TXF", contract_code)
+
+
+def get_micro_txf_contract(api, contract_code=None):
+    return get_futures_contract(api, DEFAULT_FUTURES_ROOT, contract_code)
+
+
+def get_near_month_futures_contract(api, product_root=DEFAULT_FUTURES_ROOT):
+    if api is None:
+        raise RuntimeError("尚未登入永豐 API。")
+
+    today = datetime.now().strftime("%Y/%m/%d")
+    contracts = []
+    for contract in _iter_contracts(_get_futures_group(api, product_root)):
+        code = getattr(contract, "code", "")
+        delivery_date = getattr(contract, "delivery_date", "") or "9999/99/99"
+
+        if not code.startswith(product_root) or code.startswith(f"{product_root}R"):
+            continue
+        if delivery_date and delivery_date < today:
+            continue
+
+        contracts.append(contract)
+
+    if contracts:
+        return sorted(
+            contracts,
+            key=lambda item: (
+                getattr(item, "delivery_date", "") or "9999/99/99",
+                getattr(item, "code", ""),
+            ),
+        )[0]
+
+    group = _get_futures_group(api, product_root)
+    for fallback_code in (f"{product_root}R1", f"{product_root}R2"):
+        contract = getattr(group, fallback_code, None)
+        if contract:
+            return contract
+
+    raise RuntimeError(f"找不到 {product_root} 近月契約或連續契約。")
+
+
+def get_txf_kbar_contract(api):
+    return get_near_month_futures_contract(api, "TXF")
+
+
+def get_micro_txf_kbar_contract(api):
+    return get_near_month_futures_contract(api, DEFAULT_FUTURES_ROOT)
+
+
+def _legacy_get_txf_contract(api, contract_code="TXFR1"):
     if api is None:
         raise RuntimeError("尚未登入永豐 API。")
 
@@ -118,35 +200,6 @@ def _iter_contracts(container):
         if code:
             contracts.append(value)
     return contracts
-
-
-def get_txf_kbar_contract(api):
-    if api is None:
-        raise RuntimeError("尚未登入永豐 API。")
-
-    today = datetime.now().strftime("%Y/%m/%d")
-    contracts = []
-    for contract in _iter_contracts(api.Contracts.Futures.TXF):
-        code = getattr(contract, "code", "")
-        delivery_date = getattr(contract, "delivery_date", "") or "9999/99/99"
-
-        if not code.startswith("TXF") or code.startswith("TXFR"):
-            continue
-        if delivery_date and delivery_date < today:
-            continue
-
-        contracts.append(contract)
-
-    if contracts:
-        return sorted(
-            contracts,
-            key=lambda item: (
-                getattr(item, "delivery_date", "") or "9999/99/99",
-                getattr(item, "code", ""),
-            ),
-        )[0]
-
-    return get_txf_contract(api, "TXFR1")
 
 
 def _first_price(*values):
@@ -190,7 +243,13 @@ def _kbars_to_dataframe(kbars):
     return pd.DataFrame(data)
 
 
-def get_realtime_data_from_sinopac(api, contract_code="TXFR1"):
+def _contract_label(contract):
+    code = getattr(contract, "code", "") or "UNKNOWN"
+    delivery = getattr(contract, "delivery_date", "") or ""
+    return f"{code} {delivery}".strip()
+
+
+def get_realtime_data_from_sinopac(api, product_root=DEFAULT_FUTURES_ROOT, contract_code=None):
     if api is None:
         return {
             "current_price": 0.0,
@@ -203,7 +262,7 @@ def get_realtime_data_from_sinopac(api, contract_code="TXFR1"):
         }
 
     try:
-        contract = get_txf_contract(api, contract_code)
+        contract = get_futures_contract(api, product_root, contract_code)
         snapshots = api.snapshots([contract])
 
         if not snapshots:
@@ -212,9 +271,11 @@ def get_realtime_data_from_sinopac(api, contract_code="TXFR1"):
                 "volume": 0,
                 "vwap": 0.0,
                 "vix": 0.0,
-                "source": "Sinopac snapshot",
+                "source": f"Sinopac {product_root} snapshot",
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "error": "永豐 Shioaji snapshot 無資料，可能非交易時段或尚未登入成功。",
+                "contract_code": getattr(contract, "code", ""),
+                "delivery_date": getattr(contract, "delivery_date", ""),
             }
 
         snapshot = snapshots[0]
@@ -229,9 +290,11 @@ def get_realtime_data_from_sinopac(api, contract_code="TXFR1"):
             "volume": int(_first_price(getattr(snapshot, "total_volume", 0), getattr(snapshot, "volume", 0))),
             "vwap": _first_price(getattr(snapshot, "average_price", 0), close),
             "vix": 0.0,
-            "source": f"Sinopac {contract_code} snapshot",
+            "source": f"Sinopac {_contract_label(contract)} snapshot",
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "error": None if close > 0 else "永豐 snapshot 未提供有效成交價。",
+            "contract_code": getattr(contract, "code", ""),
+            "delivery_date": getattr(contract, "delivery_date", ""),
         }
     except Exception as exc:
         return {
@@ -242,15 +305,17 @@ def get_realtime_data_from_sinopac(api, contract_code="TXFR1"):
             "source": "Sinopac snapshot",
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "error": f"永豐行情讀取失敗：{exc}",
+            "contract_code": "",
+            "delivery_date": "",
         }
 
 
-def get_recent_txf_kbars(api, days=60):
+def get_recent_futures_kbars(api, days=60, product_root=DEFAULT_FUTURES_ROOT):
     if api is None:
         return pd.DataFrame(), "尚未登入永豐 API。"
 
     try:
-        contract = get_txf_kbar_contract(api)
+        contract = get_near_month_futures_contract(api, product_root)
         end = datetime.now().date()
         start = end - timedelta(days=days)
         kbars = api.kbars(contract, start=str(start), end=str(end))
@@ -268,9 +333,19 @@ def get_recent_txf_kbars(api, days=60):
             df = df.sort_values("ts")
 
         df.attrs["contract_code"] = getattr(contract, "code", "")
+        df.attrs["delivery_date"] = getattr(contract, "delivery_date", "")
+        df.attrs["product_root"] = product_root
         return df, None
     except Exception as exc:
         return pd.DataFrame(), f"永豐 kbars 讀取失敗：{exc}"
+
+
+def get_recent_txf_kbars(api, days=60):
+    return get_recent_futures_kbars(api, days=days, product_root="TXF")
+
+
+def get_recent_micro_txf_kbars(api, days=60):
+    return get_recent_futures_kbars(api, days=days, product_root=DEFAULT_FUTURES_ROOT)
 
 
 def get_connection_status(api, simulation=True):

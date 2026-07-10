@@ -6,15 +6,19 @@ class StrategyManager:
         long_exit_score=45,
         short_exit_score=45,
         stop_loss_points=50,
+        take_profit_points=100,
     ):
         self.position = 0
         self.entry_price = 0.0
+        self.stop_loss_price = 0.0
+        self.take_profit_price = 0.0
         self.update_config(
             long_entry_score,
             short_entry_score,
             long_exit_score,
             short_exit_score,
             stop_loss_points,
+            take_profit_points,
         )
 
     def update_config(
@@ -24,19 +28,23 @@ class StrategyManager:
         long_exit_score=45,
         short_exit_score=45,
         stop_loss_points=50,
+        take_profit_points=100,
     ):
         self.long_entry_score = int(long_entry_score)
         self.short_entry_score = int(short_entry_score)
         self.long_exit_score = int(long_exit_score)
         self.short_exit_score = int(short_exit_score)
         self.stop_loss_points = float(stop_loss_points)
+        self.take_profit_points = float(take_profit_points)
 
-    def sync_position(self, position=0, entry_price=0.0):
+    def sync_position(self, position=0, entry_price=0.0, stop_loss_price=0.0, take_profit_price=0.0):
         self.position = int(position)
         self.entry_price = float(entry_price or 0)
+        self.stop_loss_price = float(stop_loss_price or 0)
+        self.take_profit_price = float(take_profit_price or 0)
 
     def reset(self):
-        self.sync_position(0, 0.0)
+        self.sync_position(0, 0.0, 0.0, 0.0)
 
     def decide_action(self, current_score, current_price):
         current_score = int(current_score)
@@ -59,9 +67,14 @@ class StrategyManager:
 
         if self.position > 0:
             profit_points = current_price - self.entry_price
+            stop_price = self.stop_loss_price or self.entry_price - self.stop_loss_points
+            take_price = self.take_profit_price or self.entry_price + self.take_profit_points
 
-            if profit_points <= -self.stop_loss_points:
-                return "CLOSE_LONG", f"多單達停損條件：{profit_points:+.0f} 點，產生平倉訊號。"
+            if current_price >= take_price:
+                return "CLOSE_LONG", f"多單到達預設獲利目標 {take_price:,.0f}，產生平倉訊號。"
+
+            if current_price <= stop_price:
+                return "CLOSE_LONG", f"多單達停損價 {stop_price:,.0f}，產生平倉訊號。"
 
             if current_score < self.long_exit_score:
                 return "CLOSE_LONG", f"評分降至 {current_score} 分，多單產生策略平倉訊號。"
@@ -70,9 +83,14 @@ class StrategyManager:
 
         if self.position < 0:
             profit_points = self.entry_price - current_price
+            stop_price = self.stop_loss_price or self.entry_price + self.stop_loss_points
+            take_price = self.take_profit_price or self.entry_price - self.take_profit_points
 
-            if profit_points <= -self.stop_loss_points:
-                return "CLOSE_SHORT", f"空單達停損條件：{profit_points:+.0f} 點，產生平倉訊號。"
+            if current_price <= take_price:
+                return "CLOSE_SHORT", f"空單到達預設獲利目標 {take_price:,.0f}，產生回補訊號。"
+
+            if current_price >= stop_price:
+                return "CLOSE_SHORT", f"空單達停損價 {stop_price:,.0f}，產生回補訊號。"
 
             if current_score > self.short_exit_score:
                 return "CLOSE_SHORT", f"評分回升至 {current_score} 分，空單產生策略平倉訊號。"
@@ -81,14 +99,24 @@ class StrategyManager:
 
         return "HOLD", "策略狀態異常，暫停產生交易指令。"
 
-    def apply_fill(self, action, fill_price, quantity=1):
+    def apply_fill(self, action, fill_price, quantity=1, stop_loss_price=0.0, take_profit_price=0.0):
         fill_price = float(fill_price or 0)
         quantity = int(quantity)
 
         if action == "BUY_LONG":
-            self.sync_position(quantity, fill_price)
+            self.sync_position(
+                quantity,
+                fill_price,
+                stop_loss_price or fill_price - self.stop_loss_points,
+                take_profit_price or fill_price + self.take_profit_points,
+            )
         elif action == "SELL_SHORT":
-            self.sync_position(-quantity, fill_price)
+            self.sync_position(
+                -quantity,
+                fill_price,
+                stop_loss_price or fill_price + self.stop_loss_points,
+                take_profit_price or fill_price - self.take_profit_points,
+            )
         elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
             self.reset()
 

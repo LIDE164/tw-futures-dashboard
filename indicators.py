@@ -52,6 +52,7 @@ def build_tech_data(df, realtime=None):
         return fallback_tech_data(realtime, reason="永豐 kbars 尚無資料")
 
     close = _column(df, "Close", "close")
+    open_ = _column(df, "Open", "open")
     high = _column(df, "High", "high")
     low = _column(df, "Low", "low")
     volume = _column(df, "Volume", "volume")
@@ -75,6 +76,14 @@ def build_tech_data(df, realtime=None):
     prev_hist = float(hist.iloc[-2]) if len(hist) >= 2 and not pd.isna(hist.iloc[-2]) else 0.0
     latest_volume = _latest(volume, realtime.get("volume", 0.0))
     avg_volume = _latest(volume.rolling(5).mean(), latest_volume)
+    touched_support = False
+    reclaimed_support = latest_bb_dn > 0 and latest_close > latest_bb_dn
+    bullish_close = False
+    if len(low) >= 2 and len(bb_dn) >= 2 and not pd.isna(bb_dn.iloc[-2]):
+        touched_support = bool(low.iloc[-2] <= bb_dn.iloc[-2] * 1.003)
+    if len(open_) >= 1 and not pd.isna(open_.iloc[-1]):
+        bullish_close = bool(latest_close > open_.iloc[-1])
+    support_retest = bool(touched_support and reclaimed_support and bullish_close)
     volatility_30d = (
         close.pct_change()
         .rolling(30)
@@ -92,7 +101,7 @@ def build_tech_data(df, realtime=None):
         "5日均量": avg_volume,
         "訊號": latest_hist > prev_hist,
         "ADX": _adx(high, low, close),
-        "回測有撐": bool(latest_bb_dn > 0 and latest_close > latest_bb_dn),
+        "回測有撐": support_retest,
         "30日年化波動率": _latest(volatility_30d),
         "資料狀態": "永豐 kbars",
         "可評分": True,
