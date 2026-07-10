@@ -106,6 +106,7 @@ for warning in (
 
 current_price = realtime["current_price"]
 tech_data = build_tech_data(kbars, realtime)
+volatility_30d = float(tech_data.get("30日年化波動率") or 0)
 
 score, label, reasons, feature = get_decision_score(tech_data, inst_data=oi_data, with_reason=True)
 
@@ -128,7 +129,7 @@ top1, top2, top3, top4 = st.columns(4)
 top1.metric("綜合評分", score, label)
 top2.metric("型態特徵", feature)
 top3.metric("盤中均價線", f"{realtime['vwap']:,.0f}" if realtime["vwap"] else "無資料")
-top4.metric("30日年化波動", f"{tech_data['30日年化波動率']:.1f}%" if tech_data["30日年化波動率"] else "無資料")
+top4.metric("30日年化波動", f"{volatility_30d:.1f}%" if volatility_30d else "無資料")
 
 if action == "HOLD":
     st.info(f"AI 策略指令：{action}\n\n{msg}")
@@ -152,6 +153,7 @@ with tab_diag:
                 "kbars_rows": len(kbars),
                 "kbars_contract": kbars.attrs.get("contract_code", "") if hasattr(kbars, "attrs") else "",
                 "kbars_error": kbars_error,
+                "tech_data_keys": list(tech_data.keys()),
                 "pc_ratio_source": public_data["pc_ratio"].get("source"),
                 "option_source": public_data["option_levels"].get("source"),
                 "mtx_source": public_data["mtx_net"].get("source"),
