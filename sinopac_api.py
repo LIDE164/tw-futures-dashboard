@@ -160,6 +160,36 @@ def _first_price(*values):
     return 0.0
 
 
+def _kbars_to_dataframe(kbars):
+    if kbars is None:
+        return pd.DataFrame()
+
+    field_names = ("ts", "Open", "High", "Low", "Close", "Volume", "Amount")
+
+    if isinstance(kbars, dict):
+        data = kbars
+    elif hasattr(kbars, "_asdict"):
+        data = kbars._asdict()
+    else:
+        data = {
+            key: value
+            for key, value in vars(kbars).items()
+            if not key.startswith("_")
+        } if hasattr(kbars, "__dict__") else {}
+
+        if not data:
+            data = {
+                field_name: getattr(kbars, field_name)
+                for field_name in field_names
+                if hasattr(kbars, field_name)
+            }
+
+    if not data:
+        return pd.DataFrame()
+
+    return pd.DataFrame(data)
+
+
 def get_realtime_data_from_sinopac(api, contract_code="TXFR1"):
     if api is None:
         return {
@@ -224,10 +254,14 @@ def get_recent_txf_kbars(api, days=60):
         end = datetime.now().date()
         start = end - timedelta(days=days)
         kbars = api.kbars(contract, start=str(start), end=str(end))
-        df = pd.DataFrame({key: value for key, value in kbars.items()})
+        df = _kbars_to_dataframe(kbars)
 
         if df.empty:
-            return df, f"永豐 kbars 無資料，使用契約：{getattr(contract, 'code', 'UNKNOWN')}。"
+            return df, (
+                "永豐 kbars 無資料，"
+                f"使用契約：{getattr(contract, 'code', 'UNKNOWN')}，"
+                f"回傳型態：{type(kbars).__name__}。"
+            )
 
         if "ts" in df.columns:
             df["ts"] = pd.to_datetime(df["ts"])
