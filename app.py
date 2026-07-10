@@ -38,6 +38,10 @@ def format_optional_number(value, suffix=""):
     return f"{value:,.0f}{suffix}"
 
 
+def empty_institutional_data(error=None):
+    return {"外資": 0, "投信": 0, "自營商": 0, "date": None, "error": error}
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_public_market_data():
     return get_public_market_data()
@@ -82,7 +86,10 @@ api, api_error = get_api(
 
 with st.spinner("更新市場資料中..."):
     public_data = load_public_market_data()
-    oi_data = public_data["txf_institutional"]
+    oi_data = public_data.get(
+        "txf_institutional",
+        empty_institutional_data("TAIFEX 法人籌碼資料尚未載入，請重新部署或清除快取後再試。"),
+    )
     realtime = get_realtime_data(api)
     kbars, kbars_error = get_recent_txf_kbars(api)
 
@@ -91,6 +98,7 @@ for warning in (
     api_error,
     realtime.get("error"),
     kbars_error,
+    oi_data.get("error"),
     *public_data.get("errors", []),
 ):
     if warning:
