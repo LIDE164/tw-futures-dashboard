@@ -6,7 +6,8 @@ param(
     [ValidateSet("STOP", "TARGET")]
     [string]$TestExit = "STOP",
     [double]$TestPrice = 25000,
-    [switch]$NoAutoPaperFill
+    [switch]$NoAutoPaperFill,
+    [switch]$NoAdaptiveRisk
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,6 +41,9 @@ if ($TestSignal) {
 }
 if ($NoAutoPaperFill) {
     $ArgsList += "--no-auto-paper-fill"
+}
+if ($NoAdaptiveRisk) {
+    $ArgsList += "--no-adaptive-risk"
 }
 
 Write-Host "Starting signal worker..."

@@ -71,6 +71,27 @@ def format_money(value):
     return f"NT$ {float(value):,.0f}" if value not in (None, "") else "無資料"
 
 
+def round_to_tick(value, tick=5):
+    if value <= 0:
+        return 0.0
+    return round(float(value) / tick) * tick
+
+
+def effective_risk_points(tech_data, fixed_stop, fixed_take, enabled=True, atr_multiplier=1.2, rr_ratio=2.0):
+    fixed_stop = float(fixed_stop)
+    fixed_take = float(fixed_take)
+    if not enabled:
+        return fixed_stop, fixed_take, "固定點數"
+
+    atr_points = float(tech_data.get("ATR") or 0)
+    if atr_points <= 0:
+        return fixed_stop, fixed_take, "ATR資料不足，使用固定點數"
+
+    stop_points = round_to_tick(max(20, min(180, atr_points * float(atr_multiplier))))
+    take_points = round_to_tick(max(stop_points, min(360, stop_points * float(rr_ratio))))
+    return stop_points, take_points, f"ATR動態：ATR {atr_points:.0f} 點"
+
+
 def resample_signal_kbars(df, rule=SIGNAL_TIMEFRAME):
     if df is None or df.empty or "ts" not in df.columns:
         return df
@@ -510,6 +531,9 @@ with st.sidebar:
     short_entry_score = st.slider("空單進場分數", 20, 50, 40)
     stop_loss_points = st.number_input("停損點數", min_value=10, max_value=300, value=50, step=10)
     take_profit_points = st.number_input("停利點數", min_value=10, max_value=600, value=100, step=10)
+    adaptive_risk_mode = st.checkbox("使用 ATR 動態停損 / 停利", value=True)
+    atr_stop_multiplier = st.slider("ATR 停損倍數", 0.8, 2.5, 1.2, 0.1)
+    reward_risk_ratio = st.slider("停利風險倍數", 1.0, 3.0, 2.0, 0.1)
 
     st.divider()
     st.subheader("模擬 / 回測成本")
@@ -585,6 +609,14 @@ market_status = get_market_status()
 current_price = realtime["current_price"]
 tech_data = build_tech_data(kbars, realtime)
 volatility_30d = float(tech_data.get("30日年化波動率") or 0)
+effective_stop_loss_points, effective_take_profit_points, risk_model_label = effective_risk_points(
+    tech_data,
+    stop_loss_points,
+    take_profit_points,
+    adaptive_risk_mode,
+    atr_stop_multiplier,
+    reward_risk_ratio,
+)
 score, label, reasons, feature = get_decision_score(tech_data, inst_data=oi_data, with_reason=True)
 
 if "strategy" not in st.session_state:
@@ -594,8 +626,8 @@ configure_strategy(
     st.session_state.strategy,
     long_entry_score,
     short_entry_score,
-    stop_loss_points,
-    take_profit_points,
+    effective_stop_loss_points,
+    effective_take_profit_points,
 )
 
 if "paper_broker" not in st.session_state:
@@ -643,13 +675,13 @@ else:
 action, msg = st.session_state.strategy.decide_action(score, current_price)
 reference_stop = None
 if action == "BUY_LONG":
-    reference_stop = current_price - stop_loss_points
+    reference_stop = current_price - effective_stop_loss_points
 elif action == "SELL_SHORT":
-    reference_stop = current_price + stop_loss_points
+    reference_stop = current_price + effective_stop_loss_points
 elif paper_broker.position > 0 and system_mode == "模擬盤模式":
-    reference_stop = paper_broker.entry_price - stop_loss_points
+    reference_stop = paper_broker.entry_price - effective_stop_loss_points
 elif paper_broker.position < 0 and system_mode == "模擬盤模式":
-    reference_stop = paper_broker.entry_price + stop_loss_points
+    reference_stop = paper_broker.entry_price + effective_stop_loss_points
 
 
 plain_reasons = summarize_reasons(reasons, msg, limit=3)
@@ -676,7 +708,7 @@ tone = "info" if not market_status.is_open and active_broker.position == 0 else 
     active_broker.position if system_mode in {"模擬盤模式", "實盤觀察模式"} else 0,
 )
 age_seconds = data_age_seconds(realtime.get("updated_at"))
-max_loss_per_contract = stop_loss_points * CONTRACT_MULTIPLIER
+max_loss_per_contract = effective_stop_loss_points * CONTRACT_MULTIPLIER
 estimated_cost = commission_per_side * 2 + slippage_points * 2 * CONTRACT_MULTIPLIER
 previous_price = st.session_state.get("previous_price")
 price_delta = current_price - previous_price if previous_price and current_price else 0
@@ -749,6 +781,12 @@ with st.container(border=True):
     risk_col, cost_col = st.columns(2)
     risk_col.metric("1口最大風險", format_money(max_loss_per_contract))
     cost_col.metric("預估來回成本", format_money(estimated_cost))
+    st.caption(
+        f"風控模型：{risk_model_label}｜停損 {effective_stop_loss_points:.0f} 點｜"
+        f"停利 {effective_take_profit_points:.0f} 點｜"
+        f"15分趨勢：{tech_data.get('15分趨勢文字', '未知')}｜"
+        f"60分趨勢：{tech_data.get('60分趨勢文字', '未知')}"
+    )
 
     st.write("平倉條件")
     st.write(trade_plan["close_rule"])
@@ -810,6 +848,14 @@ with st.expander("進階摘要", expanded=False):
     sum3, sum4 = st.columns(2)
     sum3.metric("盤中均價線", format_price(realtime.get("vwap")))
     sum4.metric("近30根波動", f"{volatility_30d:.1f}%" if volatility_30d else "無資料")
+    sum5, sum6 = st.columns(2)
+    sum5.metric("ATR", f"{float(tech_data.get('ATR') or 0):.0f} 點")
+    sum6.metric("風險環境", tech_data.get("風險環境", "未知"))
+    st.caption(
+        f"15分趨勢：{tech_data.get('15分趨勢文字', '未知')}｜"
+        f"60分趨勢：{tech_data.get('60分趨勢文字', '未知')}｜"
+        f"盤整降權：{'是' if tech_data.get('盤整') else '否'}"
+    )
 
 page = st.selectbox(
     "查看更多資訊",
@@ -829,7 +875,7 @@ elif page == "警報服務":
         h2.metric("最後心跳", heartbeat.get("updated_at", "無資料"))
         st.write(heartbeat.get("detail", ""))
     else:
-        st.warning("尚未收到 signal_worker 心跳。")
+        st.warning("尚未收到 signal_worker 心跳。若你正在看 Streamlit Cloud，雲端頁面讀不到本機 worker 的 SQLite 心跳；請改用本機 `streamlit run app.py`，或改接外部資料庫。")
 
     st.write("啟動指令")
     st.code("python signal_worker.py --interval 30", language="bash")
@@ -971,6 +1017,9 @@ elif page == "回測系統":
             short_entry_score=short_entry_score,
             stop_loss_points=stop_loss_points,
             take_profit_points=take_profit_points,
+            adaptive_risk=adaptive_risk_mode,
+            atr_stop_multiplier=atr_stop_multiplier,
+            reward_risk_ratio=reward_risk_ratio,
             signal_timeframe=SIGNAL_TIMEFRAME,
             include_institutional=False,
         )

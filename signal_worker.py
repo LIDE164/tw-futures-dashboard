@@ -123,6 +123,27 @@ def _sync_paper_tracking(broker, action, current_price, entry_price, stop_price,
     return filled, fill_msg
 
 
+def _round_to_tick(value, tick=5):
+    if value <= 0:
+        return 0.0
+    return round(float(value) / tick) * tick
+
+
+def _effective_risk_points(args, tech_data):
+    fixed_stop = float(args.stop_loss_points)
+    fixed_take = float(args.take_profit_points)
+    if not args.adaptive_risk:
+        return fixed_stop, fixed_take
+
+    atr_points = float(tech_data.get("ATR") or 0)
+    if atr_points <= 0:
+        return fixed_stop, fixed_take
+
+    stop_points = _round_to_tick(max(20, min(180, atr_points * float(args.atr_stop_multiplier))))
+    take_points = _round_to_tick(max(stop_points, min(360, stop_points * float(args.reward_risk_ratio))))
+    return stop_points, take_points
+
+
 def _build_test_signal(action, args):
     now = datetime.now(TAIPEI)
     price = float(args.test_price)
@@ -134,40 +155,41 @@ def _build_test_signal(action, args):
         "bid_price": price - 1,
         "ask_price": price + 1,
     }
+    effective_stop, effective_take = float(args.stop_loss_points), float(args.take_profit_points)
     entry_price, stop_price, take_price = _entry_plan(
         action,
         realtime,
-        float(args.stop_loss_points),
-        float(args.take_profit_points),
+        effective_stop,
+        effective_take,
     )
 
     if action == "CLOSE_LONG":
         if args.test_exit == "TARGET":
-            entry_price = price - args.take_profit_points
-            stop_price = entry_price - args.stop_loss_points
+            entry_price = price - effective_take
+            stop_price = entry_price - effective_stop
             take_price = price
             event_type = "EXIT_TARGET"
             message = "測試：多單到達停利，提醒平倉"
             reasons = ["測試多單停利通知", "確認 Telegram 平倉訊息可送達"]
         else:
-            entry_price = price + args.stop_loss_points
+            entry_price = price + effective_stop
             stop_price = price
-            take_price = entry_price + args.take_profit_points
+            take_price = entry_price + effective_take
             event_type = "EXIT_STOP"
             message = "測試：多單跌破停損，提醒平倉"
             reasons = ["測試多單停損通知", "確認 Telegram 平倉訊息可送達"]
     elif action == "CLOSE_SHORT":
         if args.test_exit == "TARGET":
-            entry_price = price + args.take_profit_points
-            stop_price = entry_price + args.stop_loss_points
+            entry_price = price + effective_take
+            stop_price = entry_price + effective_stop
             take_price = price
             event_type = "EXIT_TARGET"
             message = "測試：空單到達停利，提醒回補"
             reasons = ["測試空單停利通知", "確認 Telegram 平倉訊息可送達"]
         else:
-            entry_price = price - args.stop_loss_points
+            entry_price = price - effective_stop
             stop_price = price
-            take_price = entry_price - args.take_profit_points
+            take_price = entry_price - effective_take
             event_type = "EXIT_STOP"
             message = "測試：空單突破停損，提醒回補"
             reasons = ["測試空單停損通知", "確認 Telegram 平倉訊息可送達"]
@@ -234,11 +256,13 @@ def evaluate_once(api, args):
     )
     broker.commission_per_side = args.commission_per_side
     broker.slippage_points = args.slippage_points
+    tech_data = build_tech_data(bars, realtime)
+    effective_stop_loss_points, effective_take_profit_points = _effective_risk_points(args, tech_data)
     strategy = StrategyManager(
         long_entry_score=args.long_entry_score,
         short_entry_score=args.short_entry_score,
-        stop_loss_points=args.stop_loss_points,
-        take_profit_points=args.take_profit_points,
+        stop_loss_points=effective_stop_loss_points,
+        take_profit_points=effective_take_profit_points,
     )
     strategy.sync_position(
         broker.position,
@@ -247,7 +271,6 @@ def evaluate_once(api, args):
         broker.take_profit_price,
     )
 
-    tech_data = build_tech_data(bars, realtime)
     score, label, reasons, feature = get_decision_score(tech_data, inst_data={}, with_reason=True)
     current_price = float(realtime.get("current_price") or 0)
     action, message = strategy.decide_action(score, current_price)
@@ -266,8 +289,8 @@ def evaluate_once(api, args):
     entry_price, stop_price, take_price = _entry_plan(
         action,
         realtime,
-        float(args.stop_loss_points),
-        float(args.take_profit_points),
+        float(effective_stop_loss_points),
+        float(effective_take_profit_points),
     )
     if action in {"CLOSE_LONG", "CLOSE_SHORT"}:
         entry_price = broker.entry_price or current_price
@@ -356,6 +379,9 @@ def parse_args():
     parser.add_argument("--short-entry-score", type=int, default=40)
     parser.add_argument("--stop-loss-points", type=float, default=50)
     parser.add_argument("--take-profit-points", type=float, default=100)
+    parser.add_argument("--adaptive-risk", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--atr-stop-multiplier", type=float, default=1.2)
+    parser.add_argument("--reward-risk-ratio", type=float, default=2.0)
     parser.add_argument("--paper-quantity", type=int, default=1)
     parser.add_argument("--commission-per-side", type=float, default=0.0)
     parser.add_argument("--slippage-points", type=float, default=1.0)

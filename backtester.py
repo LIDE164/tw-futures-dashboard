@@ -73,6 +73,27 @@ def _entry_plan(action, fill_reference, stop_loss_points, take_profit_points, sl
     return 0.0, 0.0
 
 
+def _round_to_tick(value, tick=5):
+    if value <= 0:
+        return 0.0
+    return round(float(value) / tick) * tick
+
+
+def _effective_risk_points(tech_data, fixed_stop, fixed_take, adaptive_risk=True, atr_multiplier=1.2, rr_ratio=2.0):
+    fixed_stop = float(fixed_stop)
+    fixed_take = float(fixed_take)
+    if not adaptive_risk:
+        return fixed_stop, fixed_take
+
+    atr_points = float(tech_data.get("ATR") or 0)
+    if atr_points <= 0:
+        return fixed_stop, fixed_take
+
+    stop_points = _round_to_tick(max(20, min(180, atr_points * float(atr_multiplier))))
+    take_points = _round_to_tick(max(stop_points, min(360, stop_points * float(rr_ratio))))
+    return stop_points, take_points
+
+
 def _check_bar_exit(broker, bar, conservative=True):
     if broker.position == 0:
         return None, None, ""
@@ -113,6 +134,9 @@ def run_backtest(
     short_entry_score=40,
     stop_loss_points=50,
     take_profit_points=100,
+    adaptive_risk=True,
+    atr_stop_multiplier=1.2,
+    reward_risk_ratio=2.0,
     signal_timeframe="15min",
     include_institutional=False,
 ):
@@ -169,6 +193,20 @@ def run_backtest(
             broker.take_profit_price,
         )
         tech_data = build_tech_data(history, realtime)
+        effective_stop_loss_points, effective_take_profit_points = _effective_risk_points(
+            tech_data,
+            stop_loss_points,
+            take_profit_points,
+            adaptive_risk,
+            atr_stop_multiplier,
+            reward_risk_ratio,
+        )
+        strategy.update_config(
+            long_entry_score=long_entry_score,
+            short_entry_score=short_entry_score,
+            stop_loss_points=effective_stop_loss_points,
+            take_profit_points=effective_take_profit_points,
+        )
         score, label, reasons, feature = get_decision_score(
             tech_data,
             inst_data=inst_data or {} if include_institutional else {},
@@ -181,8 +219,8 @@ def run_backtest(
             entry_stop, entry_take = _entry_plan(
                 action,
                 next_open,
-                float(stop_loss_points),
-                float(take_profit_points),
+                float(effective_stop_loss_points),
+                float(effective_take_profit_points),
                 float(slippage_points),
             )
             filled, fill_message = broker.execute(
@@ -213,6 +251,8 @@ def run_backtest(
                 "position": broker.position,
                 "stop_loss_price": broker.stop_loss_price,
                 "take_profit_price": broker.take_profit_price,
+                "risk_stop_points": effective_stop_loss_points,
+                "risk_take_points": effective_take_profit_points,
                 "realized_pnl": broker.realized_pnl,
                 "unrealized_pnl": unrealized,
                 "equity": equity,

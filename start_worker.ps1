@@ -1,6 +1,7 @@
 param(
     [int]$Interval = 30,
-    [switch]$NoAutoPaperFill
+    [switch]$NoAutoPaperFill,
+    [switch]$NoAdaptiveRisk
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,6 +48,9 @@ Write-Host "Installing / updating requirements..."
 $ArgsList = @("signal_worker.py", "--interval", "$Interval")
 if ($NoAutoPaperFill) {
     $ArgsList += "--no-auto-paper-fill"
+}
+if ($NoAdaptiveRisk) {
+    $ArgsList += "--no-adaptive-risk"
 }
 
 Write-Host "Starting signal_worker in background..."

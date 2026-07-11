@@ -31,8 +31,32 @@ def get_decision_score(data, fund_data=None, inst_data=None, with_reason=False):
     volume = _to_float(data.get("成交量"))
     avg_volume = _to_float(data.get("5日均量"))
     foreign_oi = _to_float(inst_data.get("外資"))
+    trend_60m = int(_to_float(data.get("60分趨勢")))
+    atr_pct = _to_float(data.get("ATR%"))
+    risk_environment = data.get("風險環境", "一般")
+    is_choppy = bool(data.get("盤整", False))
 
     is_trending = adx >= 25
+
+    if data.get("多方趨勢一致", False):
+        score_delta += 3
+        _add_reason(reasons, with_reason, "15分與60分趨勢偏多 +3")
+    elif data.get("空方趨勢一致", False):
+        score_delta -= 3
+        _add_reason(reasons, with_reason, "15分與60分趨勢偏空 -3")
+    elif trend_60m > 0:
+        score_delta += 1
+        _add_reason(reasons, with_reason, "60分大方向偏多 +1")
+    elif trend_60m < 0:
+        score_delta -= 1
+        _add_reason(reasons, with_reason, "60分大方向偏空 -1")
+
+    if data.get("價格站上MA20", False):
+        score_delta += 1
+        _add_reason(reasons, with_reason, "價格站上MA20 +1")
+    elif data.get("價格跌破MA20", False):
+        score_delta -= 1
+        _add_reason(reasons, with_reason, "價格跌破MA20 -1")
 
     if data.get("訊號", False):
         add_score = 3 if is_trending else 1
@@ -49,6 +73,13 @@ def get_decision_score(data, fund_data=None, inst_data=None, with_reason=False):
     else:
         score_delta -= 3
         _add_reason(reasons, with_reason, "MACD轉弱 -3")
+
+    if data.get("MACD多方", False):
+        score_delta += 1
+        _add_reason(reasons, with_reason, "MACD多方擴張 +1")
+    elif data.get("MACD空方", False):
+        score_delta -= 1
+        _add_reason(reasons, with_reason, "MACD空方擴張 -1")
 
     if volume > 0 and avg_volume > 0 and volume > avg_volume * 1.1:
         score_delta += 2
@@ -71,7 +102,18 @@ def get_decision_score(data, fund_data=None, inst_data=None, with_reason=False):
         score_delta -= 1
         _add_reason(reasons, with_reason, "外資期貨淨空單 -1")
 
-    final_score = max(5, min(99, int(50 + score_delta * 3)))
+    raw_score = 50 + score_delta * 3
+    if is_choppy:
+        raw_score = 50 + (raw_score - 50) * 0.55
+        _add_reason(reasons, with_reason, "盤整盤，訊號信心降權")
+    if risk_environment == "高波動":
+        raw_score = 50 + (raw_score - 50) * 0.85
+        _add_reason(reasons, with_reason, f"高波動 ATR={atr_pct:.2f}%，降低追價權重")
+    elif risk_environment == "低波動":
+        raw_score = 50 + (raw_score - 50) * 0.75
+        _add_reason(reasons, with_reason, f"低波動 ATR={atr_pct:.2f}%，降低假突破權重")
+
+    final_score = max(5, min(99, int(raw_score)))
 
     if final_score >= 60:
         label = "強勢買進"
@@ -83,7 +125,13 @@ def get_decision_score(data, fund_data=None, inst_data=None, with_reason=False):
         label = "忽略"
 
     feature = "一般狀態"
-    if data.get("紅吞", False):
+    if is_choppy:
+        feature = "盤整降權"
+    elif data.get("多方趨勢一致", False):
+        feature = "多方趨勢一致"
+    elif data.get("空方趨勢一致", False):
+        feature = "空方趨勢一致"
+    elif data.get("紅吞", False):
         feature = "紅吞表態"
     elif data.get("回測有撐", False):
         feature = "回檔有撐"
