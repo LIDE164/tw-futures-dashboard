@@ -833,6 +833,23 @@ elif page == "警報服務":
 
     st.write("啟動指令")
     st.code("python signal_worker.py --interval 30", language="bash")
+    st.write("Windows 背景管理")
+    st.code(
+        ".\\start_worker.ps1 -Interval 30\n"
+        ".\\worker_status.ps1\n"
+        ".\\stop_worker.ps1",
+        language="powershell",
+    )
+    st.write("測試發報")
+    st.code(
+        "python signal_worker.py --test-signal BUY_LONG\n"
+        "python signal_worker.py --test-signal SELL_SHORT\n"
+        "python signal_worker.py --test-signal CLOSE_LONG\n"
+        "python signal_worker.py --test-signal CLOSE_SHORT\n"
+        "python signal_worker.py --test-signal CLOSE_LONG --test-exit TARGET\n"
+        "python signal_worker.py --test-signal CLOSE_SHORT --test-exit TARGET",
+        language="bash",
+    )
 
     recent_signals = get_recent_signals_safe(20)
     st.subheader("最近訊號")

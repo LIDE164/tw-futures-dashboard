@@ -1,6 +1,12 @@
 param(
     [switch]$Once,
-    [int]$Interval = 30
+    [int]$Interval = 30,
+    [ValidateSet("BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT")]
+    [string]$TestSignal = "",
+    [ValidateSet("STOP", "TARGET")]
+    [string]$TestExit = "STOP",
+    [double]$TestPrice = 25000,
+    [switch]$NoAutoPaperFill
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,6 +34,12 @@ Write-Host "Installing / updating requirements..."
 $ArgsList = @("signal_worker.py", "--interval", "$Interval")
 if ($Once) {
     $ArgsList += "--once"
+}
+if ($TestSignal) {
+    $ArgsList += @("--test-signal", $TestSignal, "--test-exit", $TestExit, "--test-price", "$TestPrice")
+}
+if ($NoAutoPaperFill) {
+    $ArgsList += "--no-auto-paper-fill"
 }
 
 Write-Host "Starting signal worker..."

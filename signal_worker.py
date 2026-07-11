@@ -11,13 +11,15 @@ from market_session import TAIPEI, get_market_status
 from paper_broker import PaperBroker
 from risk_manager import evaluate_entry_risk
 from scoring import get_decision_score
-from storage import restore_paper_broker_state, save_signal, update_heartbeat
+from storage import restore_paper_broker_state, save_paper_broker_state, save_signal, update_heartbeat
 from strategy import StrategyManager
 
 
 SIGNAL_TIMEFRAME = "15min"
 PRODUCT_ROOT = getattr(sinopac_api, "DEFAULT_FUTURES_ROOT", "TMF")
 WORKER_NAME = "signal_worker"
+TEST_SIGNAL_ACTIONS = {"BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT"}
+TEST_EXIT_EVENTS = {"STOP", "TARGET"}
 
 
 def _resample_completed_bars(df, rule=SIGNAL_TIMEFRAME):
@@ -68,18 +70,147 @@ def _entry_plan(action, realtime, stop_loss_points, take_profit_points):
     return current_price, 0.0, 0.0
 
 
-def _event_type(action, message):
+def _event_type(action, message, broker=None, current_price=0):
     if action == "BUY_LONG":
         return "ENTRY_LONG"
     if action == "SELL_SHORT":
         return "ENTRY_SHORT"
     if action in {"CLOSE_LONG", "CLOSE_SHORT"}:
+        current_price = float(current_price or 0)
+        if broker is not None and broker.position > 0:
+            if broker.stop_loss_price and current_price <= broker.stop_loss_price:
+                return "EXIT_STOP"
+            if broker.take_profit_price and current_price >= broker.take_profit_price:
+                return "EXIT_TARGET"
+        if broker is not None and broker.position < 0:
+            if broker.stop_loss_price and current_price >= broker.stop_loss_price:
+                return "EXIT_STOP"
+            if broker.take_profit_price and current_price <= broker.take_profit_price:
+                return "EXIT_TARGET"
         if "停損" in message:
             return "EXIT_STOP"
         if "獲利目標" in message:
             return "EXIT_TARGET"
         return "EXIT_SCORE"
     return "HOLD"
+
+
+def _sync_paper_tracking(broker, action, current_price, entry_price, stop_price, take_price, message, args):
+    if not args.auto_paper_fill:
+        return False, "paper tracking disabled"
+
+    if action in {"BUY_LONG", "SELL_SHORT"}:
+        filled, fill_msg = broker.execute(
+            action,
+            entry_price,
+            quantity=args.paper_quantity,
+            note=f"worker alert: {message}",
+            stop_loss_price=stop_price,
+            take_profit_price=take_price,
+        )
+    elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
+        filled, fill_msg = broker.execute(
+            action,
+            current_price,
+            quantity=abs(broker.position) or args.paper_quantity,
+            note=f"worker alert: {message}",
+        )
+    else:
+        return False, "no paper tracking action"
+
+    if filled:
+        save_paper_broker_state(broker)
+    return filled, fill_msg
+
+
+def _build_test_signal(action, args):
+    now = datetime.now(TAIPEI)
+    price = float(args.test_price)
+    if price <= 0:
+        price = 25000.0
+
+    realtime = {
+        "current_price": price,
+        "bid_price": price - 1,
+        "ask_price": price + 1,
+    }
+    entry_price, stop_price, take_price = _entry_plan(
+        action,
+        realtime,
+        float(args.stop_loss_points),
+        float(args.take_profit_points),
+    )
+
+    if action == "CLOSE_LONG":
+        if args.test_exit == "TARGET":
+            entry_price = price - args.take_profit_points
+            stop_price = entry_price - args.stop_loss_points
+            take_price = price
+            event_type = "EXIT_TARGET"
+            message = "測試：多單到達停利，提醒平倉"
+            reasons = ["測試多單停利通知", "確認 Telegram 平倉訊息可送達"]
+        else:
+            entry_price = price + args.stop_loss_points
+            stop_price = price
+            take_price = entry_price + args.take_profit_points
+            event_type = "EXIT_STOP"
+            message = "測試：多單跌破停損，提醒平倉"
+            reasons = ["測試多單停損通知", "確認 Telegram 平倉訊息可送達"]
+    elif action == "CLOSE_SHORT":
+        if args.test_exit == "TARGET":
+            entry_price = price + args.take_profit_points
+            stop_price = entry_price + args.stop_loss_points
+            take_price = price
+            event_type = "EXIT_TARGET"
+            message = "測試：空單到達停利，提醒回補"
+            reasons = ["測試空單停利通知", "確認 Telegram 平倉訊息可送達"]
+        else:
+            entry_price = price - args.stop_loss_points
+            stop_price = price
+            take_price = entry_price - args.take_profit_points
+            event_type = "EXIT_STOP"
+            message = "測試：空單突破停損，提醒回補"
+            reasons = ["測試空單停損通知", "確認 Telegram 平倉訊息可送達"]
+    elif action == "BUY_LONG":
+        event_type = "ENTRY_LONG"
+        message = "測試：策略分數達到做多門檻"
+        reasons = ["測試做多通知", "確認 Telegram 進場訊息可送達"]
+    elif action == "SELL_SHORT":
+        event_type = "ENTRY_SHORT"
+        message = "測試：策略分數達到做空門檻"
+        reasons = ["測試做空通知", "確認 Telegram 進場訊息可送達"]
+    else:
+        raise ValueError(f"unsupported test signal action: {action}")
+
+    signal = {
+        "signal_key": f"TEST:{now:%Y%m%d%H%M%S}:{action}:{entry_price:.0f}",
+        "contract_code": "TEST-TMF",
+        "bar_time": now.strftime("%Y/%m/%d %H:%M:%S"),
+        "action": action,
+        "score": 70 if action in {"BUY_LONG", "CLOSE_SHORT"} else 30,
+        "label": "測試訊號",
+        "feature": "test",
+        "price": price,
+        "entry_price": entry_price,
+        "stop_loss_price": stop_price,
+        "take_profit_price": take_price,
+        "reasons": reasons,
+        "message": message,
+    }
+    return signal, event_type
+
+
+def send_test_signal(args):
+    action = args.test_signal
+    if action not in TEST_SIGNAL_ACTIONS:
+        raise ValueError(f"--test-signal must be one of: {', '.join(sorted(TEST_SIGNAL_ACTIONS))}")
+
+    signal, event_type = _build_test_signal(action, args)
+    save_signal(signal)
+    sent, detail = dispatch_alert(signal, event_type)
+    update_heartbeat(WORKER_NAME, "test", f"{event_type} {action}: {detail}")
+    print(f"{event_type} {action}: {detail}")
+    return 0 if sent and detail in {"telegram sent", "webhook sent", "duplicate alert skipped"} else 1
 
 
 def evaluate_once(api, args):
@@ -94,7 +225,15 @@ def evaluate_once(api, args):
         update_heartbeat(WORKER_NAME, "warning", "尚無完整 15 分 K 可計算訊號")
         return None
 
-    broker = restore_paper_broker_state(PaperBroker(multiplier=10))
+    broker = restore_paper_broker_state(
+        PaperBroker(
+            multiplier=10,
+            commission_per_side=args.commission_per_side,
+            slippage_points=args.slippage_points,
+        )
+    )
+    broker.commission_per_side = args.commission_per_side
+    broker.slippage_points = args.slippage_points
     strategy = StrategyManager(
         long_entry_score=args.long_entry_score,
         short_entry_score=args.short_entry_score,
@@ -112,7 +251,7 @@ def evaluate_once(api, args):
     score, label, reasons, feature = get_decision_score(tech_data, inst_data={}, with_reason=True)
     current_price = float(realtime.get("current_price") or 0)
     action, message = strategy.decide_action(score, current_price)
-    event_type = _event_type(action, message)
+    event_type = _event_type(action, message, broker, current_price)
 
     if action in {"BUY_LONG", "SELL_SHORT"}:
         risk = evaluate_entry_risk(action, broker, market_status)
@@ -154,11 +293,39 @@ def evaluate_once(api, args):
     }
     save_signal(signal)
     sent, detail = dispatch_alert(signal, event_type)
-    update_heartbeat(WORKER_NAME, "ok", f"{event_type} {action}: {detail}")
+    tracking_detail = ""
+    delivered = detail in {"telegram sent", "webhook sent"}
+    if sent and delivered:
+        tracked, tracking_detail = _sync_paper_tracking(
+            broker,
+            action,
+            current_price,
+            entry_price,
+            stop_price,
+            take_price,
+            message,
+            args,
+        )
+        tracking_detail = f" | paper: {tracking_detail}" if tracking_detail else ""
+        if tracked:
+            strategy.apply_fill(
+                action,
+                entry_price,
+                args.paper_quantity,
+                stop_price,
+                take_price,
+            )
+    elif sent:
+        tracking_detail = " | paper: alert not delivered, tracking skipped"
+
+    update_heartbeat(WORKER_NAME, "ok", f"{event_type} {action}: {detail}{tracking_detail}")
     return signal
 
 
 def run_worker(args):
+    if args.test_signal:
+        return send_test_signal(args)
+
     api, api_error = sinopac_api.get_api(simulation=args.simulation)
     if api_error:
         update_heartbeat(WORKER_NAME, "error", api_error)
@@ -189,6 +356,13 @@ def parse_args():
     parser.add_argument("--short-entry-score", type=int, default=40)
     parser.add_argument("--stop-loss-points", type=float, default=50)
     parser.add_argument("--take-profit-points", type=float, default=100)
+    parser.add_argument("--paper-quantity", type=int, default=1)
+    parser.add_argument("--commission-per-side", type=float, default=0.0)
+    parser.add_argument("--slippage-points", type=float, default=1.0)
+    parser.add_argument("--auto-paper-fill", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--test-signal", choices=sorted(TEST_SIGNAL_ACTIONS), help="Send a test strategy alert")
+    parser.add_argument("--test-exit", choices=sorted(TEST_EXIT_EVENTS), default="STOP", help="Exit event for close test signals")
+    parser.add_argument("--test-price", type=float, default=25000.0, help="Reference price for --test-signal")
     return parser.parse_args()
 
 

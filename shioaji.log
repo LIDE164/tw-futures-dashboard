@@ -6,3 +6,11 @@
 [pid:55300] 2026-07-11T00:42:34.597815Z  INFO shioaji::api::api_v1::contracts::api: Loaded 8914 OPT contracts from cache
 [pid:55300] 2026-07-11T00:42:34.598303Z  INFO _core::api::auth::login: Loaded 53133 contracts after login
 [pid:55300] 2026-07-11T00:42:35.521265Z  INFO shioaji::api::token_pool: Successfully released token slot 1 via temporary runtime
+[pid:55496] 2026-07-11T00:48:18.567160Z  INFO shioaji::api::api_v1::auth::token_login: Found cached token from slot 1, verifying...
+[pid:55496] 2026-07-11T00:48:18.618044Z  INFO shioaji::api::api_v1::auth::token_login: Cached token is valid, using it
+[pid:55496] 2026-07-11T00:48:18.621154Z  INFO shioaji::api::api_v1::contracts::api: Loaded 127 IND contracts from cache
+[pid:55496] 2026-07-11T00:48:18.626019Z  INFO shioaji::api::api_v1::contracts::api: Loaded 41625 STK contracts from cache
+[pid:55496] 2026-07-11T00:48:18.627755Z  INFO shioaji::api::api_v1::contracts::api: Loaded 2467 FUT contracts from cache
+[pid:55496] 2026-07-11T00:48:18.630064Z  INFO shioaji::api::api_v1::contracts::api: Loaded 8914 OPT contracts from cache
+[pid:55496] 2026-07-11T00:48:18.630207Z  INFO _core::api::auth::login: Loaded 53133 contracts after login
+[pid:55496] 2026-07-11T00:48:37.399594Z  INFO shioaji::api::token_pool: Successfully released token slot 1 via temporary runtime

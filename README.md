@@ -61,16 +61,46 @@ python signal_worker.py --interval 30
 python signal_worker.py --once
 ```
 
+測試 Telegram 策略訊號發報：
+
+```bash
+python signal_worker.py --test-signal BUY_LONG
+python signal_worker.py --test-signal SELL_SHORT
+python signal_worker.py --test-signal CLOSE_LONG
+python signal_worker.py --test-signal CLOSE_SHORT
+python signal_worker.py --test-signal CLOSE_LONG --test-exit TARGET
+python signal_worker.py --test-signal CLOSE_SHORT --test-exit TARGET
+```
+
+這些測試指令只會送出測試通知與寫入本機紀錄，不會送出真實委託。
+
 Windows 本機建議使用專案附的 PowerShell 腳本，它會自動建立 `.venv` 並安裝 `requirements.txt`：
 
 ```powershell
 .\run_worker.ps1 -Once
 ```
 
+測試策略訊號：
+
+```powershell
+.\run_worker.ps1 -TestSignal BUY_LONG
+.\run_worker.ps1 -TestSignal SELL_SHORT
+.\run_worker.ps1 -TestSignal CLOSE_LONG
+.\run_worker.ps1 -TestSignal CLOSE_LONG -TestExit TARGET
+```
+
 常駐執行：
 
 ```powershell
 .\run_worker.ps1 -Interval 30
+```
+
+背景啟動、查看與停止：
+
+```powershell
+.\start_worker.ps1 -Interval 30
+.\worker_status.ps1
+.\stop_worker.ps1
 ```
 
 如果 PowerShell 不允許執行腳本，可先在同一個 Terminal 執行：
