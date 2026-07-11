@@ -1,4 +1,6 @@
+import os
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -69,6 +71,17 @@ def format_price(value):
 
 def format_money(value):
     return f"NT$ {float(value):,.0f}" if value not in (None, "") else "無資料"
+
+
+def is_streamlit_cloud_runtime():
+    cwd = Path.cwd().as_posix().lower()
+    home = str(Path.home()).lower()
+    cloud_markers = (
+        os.getenv("STREAMLIT_CLOUD"),
+        os.getenv("STREAMLIT_SHARING"),
+        os.getenv("STREAMLIT_SERVER_HEADLESS") if cwd.startswith("/mount/src") else "",
+    )
+    return any(cloud_markers) or cwd.startswith("/mount/src") or "adminuser" in home
 
 
 def round_to_tick(value, tick=5):
@@ -868,6 +881,15 @@ if page == "新手首頁":
 elif page == "警報服務":
     st.subheader("背景警報服務")
     st.caption("signal_worker.py 需在另一個行程常駐執行；Streamlit 只顯示狀態與紀錄。")
+    cloud_runtime = is_streamlit_cloud_runtime()
+    if cloud_runtime:
+        st.error(
+            "你目前看的像是 Streamlit Cloud。雲端頁面讀不到你電腦本機的 worker 心跳與 SQLite 紀錄，"
+            "所以這裡不能用來判斷本機自動發報是否正在跑。請以 Telegram、VS Code 的 "
+            "`worker_status.cmd`，或本機 `streamlit run app.py` 為準。"
+        )
+    else:
+        st.success("目前是本機頁面，可以讀取本機 worker 心跳與 SQLite 紀錄。")
     heartbeat = get_worker_heartbeat_safe()
     if heartbeat:
         h1, h2 = st.columns(2)
@@ -875,15 +897,18 @@ elif page == "警報服務":
         h2.metric("最後心跳", heartbeat.get("updated_at", "無資料"))
         st.write(heartbeat.get("detail", ""))
     else:
-        st.warning("尚未收到 signal_worker 心跳。若你正在看 Streamlit Cloud，雲端頁面讀不到本機 worker 的 SQLite 心跳；請改用本機 `streamlit run app.py`，或改接外部資料庫。")
+        if cloud_runtime:
+            st.info("雲端頁面沒有本機 worker 心跳是正常的，請不要用這個狀態判斷本機發報是否停止。")
+        else:
+            st.warning("尚未收到本機 signal_worker 心跳。請先啟動 `start_worker.cmd`，或用 `worker_status.cmd` 查看。")
 
     st.write("啟動指令")
     st.code("python signal_worker.py --interval 30", language="bash")
     st.write("Windows 背景管理")
     st.code(
-        ".\\start_worker.ps1 -Interval 30\n"
-        ".\\worker_status.ps1\n"
-        ".\\stop_worker.ps1",
+        ".\\start_worker.cmd -Interval 30\n"
+        ".\\worker_status.cmd\n"
+        ".\\stop_worker.cmd",
         language="powershell",
     )
     st.write("測試發報")

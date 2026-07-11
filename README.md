@@ -103,6 +103,16 @@ Windows 本機建議使用專案附的 PowerShell 腳本，它會自動建立 `.
 .\stop_worker.ps1
 ```
 
+VS Code Terminal 若無法執行 `.ps1`，請改用 `.cmd`：
+
+```powershell
+.\start_worker.cmd -Interval 30
+.\worker_status.cmd
+.\stop_worker.cmd
+```
+
+注意：Streamlit Cloud 網頁讀不到你本機 `data/trading.db`，因此無法代表本機 worker 是否正在發報。要查看本機狀態，請用 `.\worker_status.cmd` 或本機 `streamlit run app.py`。
+
 如果 PowerShell 不允許執行腳本，可先在同一個 Terminal 執行：
 
 ```powershell
