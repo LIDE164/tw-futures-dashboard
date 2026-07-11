@@ -1,4 +1,6 @@
 import os
+import argparse
+from datetime import datetime
 
 try:
     import requests
@@ -69,6 +71,28 @@ def _send_webhook(title, body):
     return False, f"webhook failed: {resp.status_code} {resp.text[:200]}"
 
 
+def _load_local_environment():
+    try:
+        import sinopac_api
+
+        loader = getattr(sinopac_api, "load_environment", None)
+        if loader:
+            loader()
+    except Exception:
+        pass
+
+
+def send_test_message():
+    _load_local_environment()
+    body = (
+        "[TW Futures Dashboard]\n"
+        "Telegram test message sent successfully.\n"
+        f"Time: {datetime.now():%Y-%m-%d %H:%M:%S}\n"
+        "If you see this, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are working."
+    )
+    return _send_telegram(body)
+
+
 def dispatch_alert(signal, event_type="SIGNAL"):
     alert_key = build_alert_key(
         event_type,
@@ -109,3 +133,21 @@ def dispatch_alert(signal, event_type="SIGNAL"):
     )
     print(body)
     return True, detail
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Alert delivery utilities")
+    parser.add_argument("--test", action="store_true", help="Send a Telegram test message")
+    args = parser.parse_args()
+
+    if not args.test:
+        parser.print_help()
+        return 0
+
+    sent, detail = send_test_message()
+    print(detail)
+    return 0 if sent else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
