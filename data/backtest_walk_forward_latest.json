@@ -1,0 +1,65 @@
+{
+  "contract": "TMFG6",
+  "delivery_date": "2026/07/15",
+  "candidate": {
+    "long_entry_score": 62,
+    "short_entry_score": 35,
+    "min_entry_rr": 1.5,
+    "atr_stop_multiplier": 1.2,
+    "reward_risk_ratio": 2.2,
+    "min_adx": 22,
+    "min_volume_ratio": 1.0,
+    "max_chase_atr": 1.0,
+    "confirmation_bars": 2,
+    "cooldown_bars": 2,
+    "allow_long": true,
+    "allow_short": false,
+    "breakeven_trigger_r": 1.0,
+    "breakeven_buffer_points": 0,
+    "max_holding_bars": 24
+  },
+  "walk_forward": [
+    {
+      "fold": 1,
+      "range": [
+        "2026-06-15 21:07:00",
+        "2026-06-24 17:28:00"
+      ],
+      "test": {
+        "total_pnl": -1930.0,
+        "trades": 3,
+        "expectancy": -643.33,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "max_drawdown": -2430.0,
+        "long_pnl": -1930.0,
+        "short_pnl": 0.0,
+        "long_trades": 3,
+        "short_trades": 0,
+        "stop_count": 3,
+        "take_count": 0
+      }
+    },
+    {
+      "fold": 2,
+      "range": [
+        "2026-06-24 17:29:00",
+        "2026-07-02 12:29:00"
+      ],
+      "test": {
+        "total_pnl": 2380.0,
+        "trades": 2,
+        "expectancy": 1190.0,
+        "win_rate": 50.0,
+        "profit_factor": 239.0,
+        "max_drawdown": -1620.0,
+        "long_pnl": 2380.0,
+        "short_pnl": 0.0,
+        "long_trades": 2,
+        "short_trades": 0,
+        "stop_count": 1,
+        "take_count": 1
+      }
+    }
+  ]
+}

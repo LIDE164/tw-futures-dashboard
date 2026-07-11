@@ -1,0 +1,180 @@
+{
+  "contract": "TMFG6",
+  "delivery_date": "2026/07/15",
+  "raw_rows": 26469,
+  "range": [
+    "2026-06-06 00:00:00",
+    "2026-07-10 05:00:00"
+  ],
+  "train_range": [
+    "2026-06-06 00:00:00",
+    "2026-07-01 09:26:00"
+  ],
+  "test_range": [
+    "2026-07-01 09:27:00",
+    "2026-07-10 05:00:00"
+  ],
+  "profiles": {
+    "baseline_current": {
+      "params": {
+        "long_entry_score": 60,
+        "short_entry_score": 40,
+        "min_entry_rr": 1.5,
+        "atr_stop_multiplier": 1.2,
+        "reward_risk_ratio": 2.0,
+        "min_adx": 20,
+        "min_volume_ratio": 0.85,
+        "max_chase_atr": 1.4,
+        "confirmation_bars": 2,
+        "cooldown_bars": 1,
+        "allow_long": true,
+        "allow_short": true,
+        "breakeven_trigger_r": 0.7,
+        "breakeven_buffer_points": 0,
+        "max_holding_bars": 0
+      },
+      "train": {
+        "total_pnl": 8980.0,
+        "trades": 15,
+        "win_rate": 40.0,
+        "win_rate_lower_90": 0,
+        "expectancy": 0,
+        "profit_factor": 1.84,
+        "max_drawdown": -7520.0,
+        "max_losing_streak": 6,
+        "long_pnl": 14050.0,
+        "short_pnl": -5070.0,
+        "long_trades": 12,
+        "short_trades": 3,
+        "stop_count": 9,
+        "take_count": 5
+      },
+      "test": {
+        "total_pnl": -2930.0,
+        "trades": 2,
+        "win_rate": 0.0,
+        "win_rate_lower_90": 0,
+        "expectancy": 0,
+        "profit_factor": 0.0,
+        "max_drawdown": -5810.0,
+        "max_losing_streak": 2,
+        "long_pnl": -2930.0,
+        "short_pnl": 0.0,
+        "long_trades": 2,
+        "short_trades": 0,
+        "stop_count": 2,
+        "take_count": 0
+      },
+      "full": {
+        "total_pnl": 6130.0,
+        "trades": 19,
+        "win_rate": 36.84,
+        "win_rate_lower_90": 0,
+        "expectancy": 0,
+        "profit_factor": 1.44,
+        "max_drawdown": -7850.0,
+        "max_losing_streak": 6,
+        "long_pnl": 11200.0,
+        "short_pnl": -5070.0,
+        "long_trades": 16,
+        "short_trades": 3,
+        "stop_count": 12,
+        "take_count": 5
+      }
+    },
+    "expectancy_long_only": {
+      "params": {
+        "long_entry_score": 62,
+        "short_entry_score": 35,
+        "min_entry_rr": 1.5,
+        "atr_stop_multiplier": 1.2,
+        "reward_risk_ratio": 2.2,
+        "min_adx": 22,
+        "min_volume_ratio": 1.0,
+        "max_chase_atr": 1.0,
+        "confirmation_bars": 2,
+        "cooldown_bars": 2,
+        "allow_long": true,
+        "allow_short": false,
+        "breakeven_trigger_r": 1.0,
+        "breakeven_buffer_points": 0,
+        "max_holding_bars": 24
+      },
+      "train": {
+        "total_pnl": 8110.0,
+        "trades": 9,
+        "win_rate": 44.44,
+        "win_rate_lower_90": 0,
+        "expectancy": 0,
+        "profit_factor": 5.16,
+        "max_drawdown": -2470.0,
+        "max_losing_streak": 4,
+        "long_pnl": 8110.0,
+        "short_pnl": 0.0,
+        "long_trades": 9,
+        "short_trades": 0,
+        "stop_count": 5,
+        "take_count": 4
+      },
+      "test": {
+        "total_pnl": -10.0,
+        "trades": 1,
+        "win_rate": 0.0,
+        "win_rate_lower_90": 0,
+        "expectancy": 0,
+        "profit_factor": 0.0,
+        "max_drawdown": -2890.0,
+        "max_losing_streak": 1,
+        "long_pnl": -10.0,
+        "short_pnl": 0.0,
+        "long_trades": 1,
+        "short_trades": 0,
+        "stop_count": 1,
+        "take_count": 0
+      },
+      "full": {
+        "total_pnl": 8100.0,
+        "trades": 10,
+        "win_rate": 40.0,
+        "win_rate_lower_90": 0,
+        "expectancy": 0,
+        "profit_factor": 5.13,
+        "max_drawdown": -2890.0,
+        "max_losing_streak": 4,
+        "long_pnl": 8100.0,
+        "short_pnl": 0.0,
+        "long_trades": 10,
+        "short_trades": 0,
+        "stop_count": 6,
+        "take_count": 4
+      }
+    }
+  },
+  "walk_forward": [
+    {
+      "fold": 1,
+      "selected": "expectancy_long_only",
+      "train": {},
+      "test": {
+        "total_pnl": 2380.0,
+        "trades": 2,
+        "win_rate": 50.0,
+        "win_rate_lower_90": 0,
+        "expectancy": 0,
+        "profit_factor": 239.0,
+        "max_drawdown": -1620.0,
+        "max_losing_streak": 1,
+        "long_pnl": 2380.0,
+        "short_pnl": 0.0,
+        "long_trades": 2,
+        "short_trades": 0,
+        "stop_count": 1,
+        "take_count": 1
+      },
+      "test_range": [
+        "2026-06-24 17:29:00",
+        "2026-07-02 12:29:00"
+      ]
+    }
+  ]
+}

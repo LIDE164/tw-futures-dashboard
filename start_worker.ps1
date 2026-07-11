@@ -1,15 +1,19 @@
 param(
     [int]$Interval = 30,
+    [int]$LongEntryScore = 62,
+    [int]$ShortEntryScore = 35,
     [double]$MinEntryRR = 1.5,
+    [double]$RewardRiskRatio = 2.2,
     [switch]$NoAutoPaperFill,
     [switch]$NoAdaptiveRisk,
     [switch]$AllowChoppy,
     [switch]$NoRequire60mAlignment,
-    [double]$MinAdx = 20,
-    [double]$MinVolumeRatio = 0.85,
-    [double]$MaxChaseAtr = 1.4,
+    [double]$MinAdx = 22,
+    [double]$MinVolumeRatio = 1.0,
+    [double]$MaxChaseAtr = 1.0,
     [int]$ConfirmationBars = 2,
     [switch]$NoLong,
+    [switch]$AllowShort,
     [switch]$NoShort,
     [switch]$NoScoreExitRequiresProfit,
     [double]$MinScoreExitProfitPoints = 0
@@ -59,7 +63,10 @@ Write-Host "Installing / updating requirements..."
 $ArgsList = @(
     "signal_worker.py",
     "--interval", "$Interval",
+    "--long-entry-score", "$LongEntryScore",
+    "--short-entry-score", "$ShortEntryScore",
     "--min-entry-rr", "$MinEntryRR",
+    "--reward-risk-ratio", "$RewardRiskRatio",
     "--min-adx", "$MinAdx",
     "--min-volume-ratio", "$MinVolumeRatio",
     "--max-chase-atr", "$MaxChaseAtr",
@@ -81,7 +88,7 @@ if ($NoRequire60mAlignment) {
 if ($NoLong) {
     $ArgsList += "--no-allow-long"
 }
-if ($NoShort) {
+if ($NoShort -or -not $AllowShort) {
     $ArgsList += "--no-allow-short"
 }
 if ($NoScoreExitRequiresProfit) {
