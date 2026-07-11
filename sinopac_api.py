@@ -438,6 +438,8 @@ def get_recent_futures_kbars(api, days=60, product_root=DEFAULT_FUTURES_ROOT):
         df.attrs["contract_code"] = getattr(contract, "code", "")
         df.attrs["delivery_date"] = getattr(contract, "delivery_date", "")
         df.attrs["product_root"] = product_root
+        df.attrs["source"] = "Sinopac Shioaji kbars"
+        df.attrs["days"] = days
         return df, None
     except Exception as exc:
         return pd.DataFrame(), f"永豐 kbars 讀取失敗：{exc}"

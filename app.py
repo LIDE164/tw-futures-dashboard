@@ -1162,6 +1162,19 @@ elif page == "模擬部位":
 elif page == "回測系統":
     st.subheader("回測系統")
     st.caption("固定使用 15 分鐘 K。法人籌碼暫不納入歷史回測，避免用今日資料回填過去。")
+    kbar_source = raw_kbars.attrs.get("source", "未知來源") if hasattr(raw_kbars, "attrs") else "未知來源"
+    kbar_contract = raw_kbars.attrs.get("contract_code", "") if hasattr(raw_kbars, "attrs") else ""
+    kbar_delivery = raw_kbars.attrs.get("delivery_date", "") if hasattr(raw_kbars, "attrs") else ""
+    if raw_kbars is not None and not raw_kbars.empty and "ts" in raw_kbars.columns:
+        kbar_ts = pd.to_datetime(raw_kbars["ts"], errors="coerce").dropna()
+        if not kbar_ts.empty:
+            st.info(
+                "回測資料來源："
+                f"{kbar_source}｜契約：{kbar_contract or '未知'}"
+                f"{f'｜到期：{kbar_delivery}' if kbar_delivery else ''}"
+                f"｜原始K線：{len(raw_kbars):,} 根"
+                f"｜區間：{kbar_ts.iloc[0].strftime('%Y/%m/%d %H:%M')} ~ {kbar_ts.iloc[-1].strftime('%Y/%m/%d %H:%M')}"
+            )
 
     if raw_kbars.empty:
         st.warning("目前沒有足夠 K 線資料可回測。")
