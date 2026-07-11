@@ -1,4 +1,5 @@
 import os
+import inspect
 from datetime import datetime
 from pathlib import Path
 
@@ -6,7 +7,6 @@ import pandas as pd
 import streamlit as st
 
 import charting
-from backtester import optimize_backtest_parameters, optimize_then_validate, run_backtest
 from indicators import build_tech_data
 from market_session import TAIPEI, format_datetime, get_market_status
 from market_data import get_public_market_data
@@ -20,6 +20,24 @@ try:
     import storage
 except Exception:
     storage = None
+
+try:
+    import backtester
+except Exception as exc:
+    backtester = None
+    BACKTESTER_IMPORT_ERROR = str(exc)
+else:
+    BACKTESTER_IMPORT_ERROR = ""
+
+
+def _backtester_unavailable(*args, **kwargs):
+    return pd.DataFrame(), pd.DataFrame(), {"error": f"回測模組尚未載入：{BACKTESTER_IMPORT_ERROR or '版本不完整'}"}
+
+
+run_backtest = getattr(backtester, "run_backtest", _backtester_unavailable)
+optimize_backtest_parameters = getattr(backtester, "optimize_backtest_parameters", lambda *args, **kwargs: pd.DataFrame())
+optimize_then_validate = getattr(backtester, "optimize_then_validate", lambda *args, **kwargs: pd.DataFrame())
+walk_forward_validate = getattr(backtester, "walk_forward_validate", lambda *args, **kwargs: pd.DataFrame())
 
 
 st.set_page_config(
@@ -244,12 +262,33 @@ def get_worker_heartbeat_safe():
 
 def evaluate_entry_risk_compatible(action, broker, market_status, **kwargs):
     try:
+        signature = inspect.signature(evaluate_entry_risk)
+        params = signature.parameters
+        accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        if not accepts_kwargs:
+            kwargs = {key: value for key, value in kwargs.items() if key in params}
+    except (TypeError, ValueError):
+        pass
+
+    try:
         return evaluate_entry_risk(action, broker, market_status, **kwargs)
     except TypeError as exc:
         unsupported_kwarg = "unexpected keyword argument" in str(exc)
         if not unsupported_kwarg:
             raise
-        return evaluate_entry_risk(action, broker, market_status)
+        safe_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key
+            in {
+                "now",
+                "max_daily_trades",
+                "max_daily_loss",
+                "max_consecutive_losses",
+                "no_new_entry_before_close_minutes",
+            }
+        }
+        return evaluate_entry_risk(action, broker, market_status, **safe_kwargs)
 
 
 def get_recent_signals_safe(limit=20):
@@ -1283,6 +1322,48 @@ elif page == "回測系統":
                         st.success(f"有 {oos_hit_count} 組樣本外可信達標，才比較接近可用策略。")
                     else:
                         st.warning("目前沒有樣本外可信達標組合；不要只採用訓練段勝率漂亮的參數。")
+
+            if st.button("滾動 Walk-forward 驗證", use_container_width=True):
+                walk_forward = walk_forward_validate(
+                    raw_kbars,
+                    base_kwargs={
+                        "inst_data": {},
+                        "quantity": paper_quantity,
+                        "multiplier": contract_multiplier,
+                        "commission_per_side": commission_per_side,
+                        "slippage_points": slippage_points,
+                        "stop_loss_points": stop_loss_points,
+                        "take_profit_points": take_profit_points,
+                        "adaptive_risk": adaptive_risk_mode,
+                        "atr_stop_multiplier": atr_stop_multiplier,
+                        "reward_risk_ratio": reward_risk_ratio,
+                        "min_volume_ratio": min_entry_volume_ratio,
+                        "confirmation_bars": confirmation_bars,
+                        "cooldown_bars": cooldown_bars,
+                        "allow_long": allow_long,
+                        "allow_short": allow_short,
+                        "breakeven_trigger_r": breakeven_trigger_r,
+                        "breakeven_buffer_points": breakeven_buffer_points,
+                        "max_holding_bars": max_holding_bars,
+                        "score_exit_requires_profit": score_exit_requires_profit,
+                        "min_score_exit_profit_points": min_score_exit_profit_points,
+                        "signal_timeframe": SIGNAL_TIMEFRAME,
+                        "include_institutional": False,
+                    },
+                    folds=3,
+                    min_trades=min_scan_trades,
+                )
+                if walk_forward.empty:
+                    st.warning("K 線資料不足，暫時無法做 Walk-forward 驗證。請增加歷史資料天數。")
+                else:
+                    st.dataframe(walk_forward, use_container_width=True)
+                    ok_rows = walk_forward[walk_forward.get("狀態", "") == "ok"] if "狀態" in walk_forward.columns else walk_forward
+                    trusted = int(ok_rows["樣本外可信達標"].sum()) if "樣本外可信達標" in ok_rows.columns else 0
+                    total = len(ok_rows)
+                    if total and trusted == total:
+                        st.success("所有 Walk-forward 樣本外切片都可信達標，這組參數才比較接近可用。")
+                    else:
+                        st.warning(f"Walk-forward 可信達標 {trusted}/{total} 段；目前仍不建議只為了高勝率直接套用。")
 
 elif page == "帳務參考":
     st.subheader("永豐帳務參考")
