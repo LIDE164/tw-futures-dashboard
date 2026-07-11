@@ -242,6 +242,16 @@ def get_worker_heartbeat_safe():
     return {}
 
 
+def evaluate_entry_risk_compatible(action, broker, market_status, **kwargs):
+    try:
+        return evaluate_entry_risk(action, broker, market_status, **kwargs)
+    except TypeError as exc:
+        unsupported_kwarg = "unexpected keyword argument" in str(exc)
+        if not unsupported_kwarg:
+            raise
+        return evaluate_entry_risk(action, broker, market_status)
+
+
 def get_recent_signals_safe(limit=20):
     func = getattr(storage, "get_recent_signals", None)
     return func(limit) if func else []
@@ -729,7 +739,7 @@ trade_plan = build_trade_plan(
     realtime,
     slippage_points,
 )
-risk_decision = evaluate_entry_risk(
+risk_decision = evaluate_entry_risk_compatible(
     action,
     paper_broker,
     market_status,
@@ -740,7 +750,7 @@ risk_decision = evaluate_entry_risk(
     nearest_resistance=tech_data.get("上方壓力") or 0,
     nearest_support=tech_data.get("下方支撐") or 0,
 )
-if action in {"BUY_LONG", "SELL_SHORT"} and not risk_decision.allowed:
+if action in {"BUY_LONG", "SELL_SHORT"} and not getattr(risk_decision, "allowed", False):
     trade_plan["title"] = "訊號成立｜風控禁止進場"
     trade_plan["summary"] = "策略訊號成立，但目前新手風控規則禁止進場。"
     trade_plan["entry_price"] = None
@@ -761,7 +771,13 @@ st.session_state.previous_price = current_price
 entry_actions = {"BUY_LONG", "SELL_SHORT"}
 data_is_fresh = age_seconds is not None and age_seconds <= 30
 entry_signal = action in entry_actions
-can_consider_entry = entry_signal and market_status.is_open and data_is_fresh and risk_decision.allowed
+risk_allowed = bool(getattr(risk_decision, "allowed", False))
+risk_reasons = getattr(risk_decision, "reasons", [])
+risk_daily_trades = getattr(risk_decision, "daily_trades", 0)
+risk_daily_pnl = getattr(risk_decision, "daily_pnl", 0)
+risk_consecutive_losses = getattr(risk_decision, "consecutive_losses", 0)
+risk_rr = float(getattr(risk_decision, "reward_risk_ratio", 0.0) or 0.0)
+can_consider_entry = entry_signal and market_status.is_open and data_is_fresh and risk_allowed
 if can_consider_entry:
     execution_status = "可考慮進場"
 elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
@@ -828,7 +844,7 @@ with st.container(border=True):
     st.caption(
         f"風控模型：{risk_model_label}｜停損 {effective_stop_loss_points:.0f} 點｜"
         f"停利 {effective_take_profit_points:.0f} 點｜"
-        f"RR {risk_decision.reward_risk_ratio:.2f}R｜"
+        f"RR {risk_rr:.2f}R｜"
         f"15分趨勢：{tech_data.get('15分趨勢文字', '未知')}｜"
         f"60分趨勢：{tech_data.get('60分趨勢文字', '未知')}"
     )
@@ -846,15 +862,15 @@ with st.container(border=True):
     st.write("為什麼這樣建議")
     for item in plain_reasons:
         st.write(f"- {item}")
-    if risk_decision.reasons:
+    if risk_reasons:
         st.write("風控原因")
-        for item in risk_decision.reasons:
+        for item in risk_reasons:
             st.write(f"- {item}")
 
 st.caption(
-    f"風控：今日 {risk_decision.daily_trades}/3 筆｜"
-    f"已實現 {format_money(risk_decision.daily_pnl)}｜"
-    f"連虧 {risk_decision.consecutive_losses}/2"
+    f"風控：今日 {risk_daily_trades}/3 筆｜"
+    f"已實現 {format_money(risk_daily_pnl)}｜"
+    f"連虧 {risk_consecutive_losses}/2"
 )
 
 with st.container(border=True):
@@ -1017,7 +1033,7 @@ elif page == "模擬部位":
 
     can_paper_execute = (
         market_status.is_open
-        and risk_decision.allowed
+        and risk_allowed
         and action in {"BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT"}
     )
     col_exec, col_reset = st.columns(2)
