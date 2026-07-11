@@ -5,6 +5,11 @@ from paper_broker import PaperBroker
 from scoring import get_decision_score
 from strategy import StrategyManager
 
+
+# The longest indicator needs roughly 240 15-minute bars for a 60-hour trend.
+# A bounded causal window keeps parameter scans fast without using future bars.
+INDICATOR_LOOKBACK_BARS = 400
+
 try:
     from risk_manager import evaluate_reward_risk, evaluate_signal_quality
 except ImportError:
@@ -349,7 +354,8 @@ def run_backtest(
         elif broker.position != 0:
             _maybe_apply_breakeven_stop(broker, bar, breakeven_trigger_r, breakeven_buffer_points)
 
-        history = df.iloc[: i + 1].copy()
+        history_start = max(0, i + 1 - INDICATOR_LOOKBACK_BARS)
+        history = df.iloc[history_start : i + 1].copy()
         current_price = float(history["Close"].iloc[-1])
         next_open = float(df["Open"].iloc[i + 1])
 
@@ -445,7 +451,7 @@ def run_backtest(
                 fill_message = message
                 filled = False
             elif action in {"BUY_LONG", "SELL_SHORT"} and int(confirmation_bars) >= 2:
-                prev_history = df.iloc[:i].copy()
+                prev_history = history.iloc[:-1].copy()
                 prev_realtime = {
                     "current_price": float(prev_history["Close"].iloc[-1]),
                     "volume": float(prev_history["Volume"].iloc[-1]),
@@ -704,12 +710,18 @@ def optimize_backtest_parameters(df, base_kwargs=None, min_trades=5, top_n=10):
     results = []
 
     profiles = [
-        ("高勝率保守", 65, 35, 1.0, 1.0, 1.15, 20, 1.0, 2, 2, True, True, 0.6, 5, 12, True, 0),
-        ("高勝率標準", 60, 40, 1.0, 1.1, 1.25, 18, 1.2, 2, 1, True, True, 0.7, 0, 16, True, 0),
-        ("平衡標準", 60, 40, 1.2, 1.2, 1.5, 20, 1.4, 2, 1, True, True, 0.8, 0, 24, True, 0),
-        ("趨勢型", 65, 35, 1.5, 1.3, 2.0, 22, 1.4, 2, 1, True, True, 1.0, 0, 0, False, 0),
-        ("只做多高勝率", 65, 35, 1.0, 1.0, 1.15, 20, 1.0, 2, 2, True, False, 0.6, 5, 12, True, 0),
-        ("只做空高勝率", 65, 35, 1.0, 1.0, 1.15, 20, 1.0, 2, 2, False, True, 0.6, 5, 12, True, 0),
+        # name, long, short, min RR, ATR stop, target R, ADX, volume ratio,
+        # max chase ATR, confirmation, cooldown, long, short, breakeven R,
+        # breakeven buffer, max holding, profitable score exit, min exit profit.
+        ("期望值趨勢", 65, 35, 1.5, 1.3, 2.2, 22, 1.00, 1.0, 2, 2, True, True, 1.0, 0, 24, True, 0),
+        ("期望值只做多", 62, 35, 1.5, 1.2, 2.2, 22, 1.00, 1.0, 2, 2, True, False, 1.0, 0, 24, True, 0),
+        ("低回撤只做多", 65, 35, 1.4, 1.0, 1.8, 25, 1.00, 0.8, 2, 2, True, False, 0.8, 5, 16, True, 0),
+        ("高勝率保守", 65, 35, 1.0, 1.0, 1.15, 20, 0.90, 1.0, 2, 2, True, True, 0.6, 5, 12, True, 0),
+        ("高勝率標準", 60, 40, 1.0, 1.1, 1.25, 18, 0.85, 1.2, 2, 1, True, True, 0.7, 0, 16, True, 0),
+        ("平衡標準", 60, 40, 1.2, 1.2, 1.5, 20, 0.85, 1.4, 2, 1, True, True, 0.8, 0, 24, True, 0),
+        ("趨勢型", 65, 35, 1.5, 1.3, 2.0, 22, 1.00, 1.2, 2, 1, True, True, 1.0, 0, 0, False, 0),
+        ("只做多高勝率", 65, 35, 1.0, 1.0, 1.15, 20, 0.90, 1.0, 2, 2, True, False, 0.6, 5, 12, True, 0),
+        ("只做空高勝率", 65, 35, 1.0, 1.0, 1.15, 20, 0.90, 1.0, 2, 2, False, True, 0.6, 5, 12, True, 0),
     ]
 
     for (
@@ -720,6 +732,7 @@ def optimize_backtest_parameters(df, base_kwargs=None, min_trades=5, top_n=10):
         atr_stop,
         take_rr,
         min_adx,
+        min_volume_ratio,
         max_chase,
         confirmation,
         cooldown,
@@ -739,6 +752,7 @@ def optimize_backtest_parameters(df, base_kwargs=None, min_trades=5, top_n=10):
             "atr_stop_multiplier": atr_stop,
             "reward_risk_ratio": take_rr,
             "min_adx": min_adx,
+            "min_volume_ratio": min_volume_ratio,
             "max_chase_atr": max_chase,
             "confirmation_bars": confirmation,
             "cooldown_bars": cooldown,
@@ -762,13 +776,27 @@ def optimize_backtest_parameters(df, base_kwargs=None, min_trades=5, top_n=10):
         win_rate_lower = float(summary.get("勝率可信下限90", 0) or 0)
         expectancy = float(summary.get("期望值", 0) or 0)
         profit_factor = float(summary.get("Profit Factor", 0) or 0)
+        total_pnl = float(summary.get("總損益", 0) or 0)
+        max_drawdown = abs(float(summary.get("最大回撤", 0) or 0))
+        avg_loss = abs(float(summary.get("平均虧損", 0) or 0))
+        trade_count = int(summary.get("交易次數", 0) or 0)
+        expectancy_r = expectancy / avg_loss if avg_loss > 0 else 0.0
+        recovery_factor = total_pnl / max_drawdown if max_drawdown > 0 else 0.0
         target_hit = win_rate >= 60 and expectancy > 0 and profit_factor >= 1.2
         robust_hit = target_hit and win_rate_lower >= 45
         viable = expectancy > 0 and profit_factor >= 1.0
+        robust_expectancy = (
+            expectancy > 0
+            and profit_factor >= 1.3
+            and recovery_factor >= 1.0
+            and trade_count >= max(10, int(min_trades))
+        )
         quality_score = (
-            min(win_rate, 70) * 1.0
-            + min(max(expectancy, 0), 1000) / 20
-            + min(profit_factor, 3) * 10
+            min(max(profit_factor, 0), 3.0) / 2.0 * 30
+            + min(max(expectancy_r, 0), 0.75) / 0.5 * 25
+            + min(max(recovery_factor, 0), 3.0) / 2.0 * 20
+            + min(max(win_rate_lower, 0), 60.0) / 45.0 * 15
+            + min(trade_count, 30) / 30.0 * 10
         )
         results.append(
             {
@@ -779,6 +807,7 @@ def optimize_backtest_parameters(df, base_kwargs=None, min_trades=5, top_n=10):
                 "ATR停損倍數": atr_stop,
                 "停利倍數": take_rr,
                 "最低ADX": min_adx,
+                "最低量比": min_volume_ratio,
                 "最大追價ATR": max_chase,
                 "確認K": confirmation,
                 "冷卻K": cooldown,
@@ -790,8 +819,11 @@ def optimize_backtest_parameters(df, base_kwargs=None, min_trades=5, top_n=10):
                 "評分出場需浮盈": bool(score_exit_profit_only),
                 "評分出場最低浮盈": score_exit_min_profit,
                 "正期望": bool(viable),
+                "穩健正期望": bool(robust_expectancy),
                 "達標": bool(target_hit),
                 "可信達標": bool(robust_hit),
+                "每筆期望R": round(float(expectancy_r), 3),
+                "回撤效率": round(float(recovery_factor), 2),
                 "品質分數": round(float(quality_score), 2),
                 **summary,
             }
@@ -802,7 +834,7 @@ def optimize_backtest_parameters(df, base_kwargs=None, min_trades=5, top_n=10):
 
     out = pd.DataFrame(results)
     return out.sort_values(
-        ["可信達標", "達標", "正期望", "品質分數", "期望值", "總損益", "勝率"],
+        ["穩健正期望", "可信達標", "正期望", "品質分數", "期望值", "回撤效率", "交易次數"],
         ascending=[False, False, False, False, False, False, False],
     ).head(top_n).reset_index(drop=True)
 
@@ -841,6 +873,7 @@ def optimize_then_validate(df, base_kwargs=None, train_ratio=0.7, min_trades=5, 
             "atr_stop_multiplier": float(row.get("ATR停損倍數", base_kwargs.get("atr_stop_multiplier", 1.2))),
             "reward_risk_ratio": float(row.get("停利倍數", base_kwargs.get("reward_risk_ratio", 2.0))),
             "min_adx": float(row["最低ADX"]),
+            "min_volume_ratio": float(row.get("最低量比", base_kwargs.get("min_volume_ratio", 0.85))),
             "max_chase_atr": float(row["最大追價ATR"]),
             "confirmation_bars": int(row.get("確認K", base_kwargs.get("confirmation_bars", 2))),
             "cooldown_bars": int(row.get("冷卻K", base_kwargs.get("cooldown_bars", 1))),
@@ -938,6 +971,7 @@ def walk_forward_validate(df, base_kwargs=None, folds=3, min_trades=3):
             "atr_stop_multiplier": float(row.get("ATR停損倍數", base_kwargs.get("atr_stop_multiplier", 1.2))),
             "reward_risk_ratio": float(row.get("停利倍數", base_kwargs.get("reward_risk_ratio", 2.0))),
             "min_adx": float(row["最低ADX"]),
+            "min_volume_ratio": float(row.get("最低量比", base_kwargs.get("min_volume_ratio", 0.85))),
             "max_chase_atr": float(row["最大追價ATR"]),
             "confirmation_bars": int(row.get("確認K", base_kwargs.get("confirmation_bars", 2))),
             "cooldown_bars": int(row.get("冷卻K", base_kwargs.get("cooldown_bars", 1))),

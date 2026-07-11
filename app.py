@@ -1251,10 +1251,11 @@ elif page == "回測系統":
 
             st.subheader("參數掃描")
             st.caption(
-                "掃描會比較高勝率型、平衡型、趨勢型參數。"
-                "請優先看「達標 / 期望值 / Profit Factor / 交易次數」，不要只看勝率。"
+                "掃描會比較期望值趨勢、方向分離、低回撤、高勝率與平衡型參數。"
+                "請優先看「穩健正期望 / 每筆期望R / 回撤效率 / Profit Factor / 交易次數」。"
             )
-            min_scan_trades = st.number_input("掃描至少交易筆數", min_value=1, max_value=50, value=5, step=1)
+            min_scan_trades = st.number_input("掃描至少交易筆數", min_value=1, max_value=50, value=10, step=1)
+            st.caption("排名優先考慮正期望、Profit Factor、回撤效率與樣本可信度；同一段資料勝出仍需通過樣本外驗證。")
             if st.button("掃描提高期望值參數", use_container_width=True):
                 backtest_base_kwargs = {
                     "inst_data": {},
@@ -1290,6 +1291,18 @@ elif page == "回測系統":
                     st.warning("沒有找到符合最低交易筆數的參數組合。可降低最低交易筆數，或放寬 ADX/RR/追價限制。")
                 else:
                     st.dataframe(optimized, use_container_width=True)
+                    best = optimized.iloc[0]
+                    best_message = (
+                        f"第一候選：{best.get('設定類型', '未命名')}｜"
+                        f"期望值 {float(best.get('期望值', 0)):,.0f}/筆｜"
+                        f"PF {float(best.get('Profit Factor', 0)):.2f}｜"
+                        f"最大回撤 {float(best.get('最大回撤', 0)):,.0f}｜"
+                        f"交易 {int(best.get('交易次數', 0))} 筆"
+                    )
+                    if bool(best.get("穩健正期望", False)):
+                        st.success(best_message + "。請再執行樣本外驗證。")
+                    else:
+                        st.warning(best_message + "。目前仍未達穩健正期望門檻，暫時不要套用到警報服務。")
                     hit_count = int(optimized["可信達標"].sum()) if "可信達標" in optimized.columns else 0
                     if hit_count:
                         st.success(f"找到 {hit_count} 組訓練段可信達標組合。下一步請按樣本外驗證確認是否沒有過度最佳化。")
