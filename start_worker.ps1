@@ -1,5 +1,6 @@
 param(
     [int]$Interval = 30,
+    [double]$MinEntryRR = 1.5,
     [switch]$NoAutoPaperFill,
     [switch]$NoAdaptiveRisk
 )
@@ -45,7 +46,7 @@ Write-Host "Installing / updating requirements..."
 & $VenvPython -m pip install --upgrade pip
 & $VenvPip install -r requirements.txt
 
-$ArgsList = @("signal_worker.py", "--interval", "$Interval")
+$ArgsList = @("signal_worker.py", "--interval", "$Interval", "--min-entry-rr", "$MinEntryRR")
 if ($NoAutoPaperFill) {
     $ArgsList += "--no-auto-paper-fill"
 }

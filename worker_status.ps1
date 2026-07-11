@@ -4,6 +4,7 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PidPath = Join-Path $ProjectRoot "data\signal_worker.pid"
 $OutLog = Join-Path $ProjectRoot "logs\signal_worker.out.log"
 $ErrLog = Join-Path $ProjectRoot "logs\signal_worker.err.log"
+$HeartbeatText = Join-Path $ProjectRoot "data\signal_worker_heartbeat.txt"
 
 if (Test-Path $PidPath) {
     $WorkerPid = (Get-Content -Path $PidPath -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -15,6 +16,16 @@ if (Test-Path $PidPath) {
     }
 } else {
     Write-Host "signal_worker is not running."
+}
+
+if (Test-Path $HeartbeatText) {
+    Write-Host ""
+    Write-Host "Last worker heartbeat:"
+    Get-Content -Path $HeartbeatText
+} else {
+    Write-Host ""
+    Write-Host "Last worker heartbeat:"
+    Write-Host "No text heartbeat yet. Restart the worker after updating, then check again after one interval."
 }
 
 if (Test-Path $OutLog) {

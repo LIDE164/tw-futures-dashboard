@@ -1,6 +1,7 @@
-import argparse
+﻿import argparse
 import time
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -20,6 +21,16 @@ PRODUCT_ROOT = getattr(sinopac_api, "DEFAULT_FUTURES_ROOT", "TMF")
 WORKER_NAME = "signal_worker"
 TEST_SIGNAL_ACTIONS = {"BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT"}
 TEST_EXIT_EVENTS = {"STOP", "TARGET"}
+HEARTBEAT_TEXT_PATH = Path("data/signal_worker_heartbeat.txt")
+
+
+def _update_worker_heartbeat(status, detail=""):
+    update_heartbeat(WORKER_NAME, status, detail)
+    HEARTBEAT_TEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HEARTBEAT_TEXT_PATH.write_text(
+        f"updated_at={datetime.now(TAIPEI):%Y-%m-%d %H:%M:%S}\nstatus={status}\ndetail={detail}\n",
+        encoding="utf-8",
+    )
 
 
 def _resample_completed_bars(df, rule=SIGNAL_TIMEFRAME):
@@ -89,7 +100,7 @@ def _event_type(action, message, broker=None, current_price=0):
                 return "EXIT_TARGET"
         if "停損" in message:
             return "EXIT_STOP"
-        if "獲利目標" in message:
+        if "獲利目標" in message or "停利" in message:
             return "EXIT_TARGET"
         return "EXIT_SCORE"
     return "HOLD"
@@ -144,6 +155,26 @@ def _effective_risk_points(args, tech_data):
     return stop_points, take_points
 
 
+def _heartbeat_detail(market_status, realtime, bars, score=None, label="", action="", message=""):
+    current_price = float(realtime.get("current_price") or 0)
+    bar_time = "no_completed_bar"
+    if bars is not None and not bars.empty and "ts" in bars.columns:
+        bar_time = pd.to_datetime(bars["ts"].iloc[-1]).strftime("%Y/%m/%d %H:%M")
+    parts = [
+        f"checked_at {datetime.now(TAIPEI):%Y/%m/%d %H:%M:%S}",
+        f"market {market_status.label}",
+        f"price {current_price:,.0f}",
+        f"bar {bar_time}",
+    ]
+    if score is not None:
+        parts.append(f"score {score} {label}")
+    if action:
+        parts.append(f"action {action}")
+    if message:
+        parts.append(str(message))
+    return " | ".join(parts)
+
+
 def _build_test_signal(action, args):
     now = datetime.now(TAIPEI)
     price = float(args.test_price)
@@ -169,38 +200,38 @@ def _build_test_signal(action, args):
             stop_price = entry_price - effective_stop
             take_price = price
             event_type = "EXIT_TARGET"
-            message = "測試：多單到達停利，提醒平倉"
-            reasons = ["測試多單停利通知", "確認 Telegram 平倉訊息可送達"]
+            message = "test long target exit"
+            reasons = ["test signal: long target reached", "telegram delivery check"]
         else:
             entry_price = price + effective_stop
             stop_price = price
             take_price = entry_price + effective_take
             event_type = "EXIT_STOP"
-            message = "測試：多單跌破停損，提醒平倉"
-            reasons = ["測試多單停損通知", "確認 Telegram 平倉訊息可送達"]
+            message = "test long stop exit"
+            reasons = ["test signal: long stop reached", "telegram delivery check"]
     elif action == "CLOSE_SHORT":
         if args.test_exit == "TARGET":
             entry_price = price + effective_take
             stop_price = entry_price + effective_stop
             take_price = price
             event_type = "EXIT_TARGET"
-            message = "測試：空單到達停利，提醒回補"
-            reasons = ["測試空單停利通知", "確認 Telegram 平倉訊息可送達"]
+            message = "test short target exit"
+            reasons = ["test signal: short target reached", "telegram delivery check"]
         else:
             entry_price = price - effective_stop
             stop_price = price
             take_price = entry_price - effective_take
             event_type = "EXIT_STOP"
-            message = "測試：空單突破停損，提醒回補"
-            reasons = ["測試空單停損通知", "確認 Telegram 平倉訊息可送達"]
+            message = "test short stop exit"
+            reasons = ["test signal: short stop reached", "telegram delivery check"]
     elif action == "BUY_LONG":
         event_type = "ENTRY_LONG"
-        message = "測試：策略分數達到做多門檻"
-        reasons = ["測試做多通知", "確認 Telegram 進場訊息可送達"]
+        message = "test long entry"
+        reasons = ["test signal: long entry", "telegram delivery check"]
     elif action == "SELL_SHORT":
         event_type = "ENTRY_SHORT"
-        message = "測試：策略分數達到做空門檻"
-        reasons = ["測試做空通知", "確認 Telegram 進場訊息可送達"]
+        message = "test short entry"
+        reasons = ["test signal: short entry", "telegram delivery check"]
     else:
         raise ValueError(f"unsupported test signal action: {action}")
 
@@ -210,7 +241,7 @@ def _build_test_signal(action, args):
         "bar_time": now.strftime("%Y/%m/%d %H:%M:%S"),
         "action": action,
         "score": 70 if action in {"BUY_LONG", "CLOSE_SHORT"} else 30,
-        "label": "測試訊號",
+        "label": "test signal",
         "feature": "test",
         "price": price,
         "entry_price": entry_price,
@@ -230,7 +261,7 @@ def send_test_signal(args):
     signal, event_type = _build_test_signal(action, args)
     save_signal(signal)
     sent, detail = dispatch_alert(signal, event_type)
-    update_heartbeat(WORKER_NAME, "test", f"{event_type} {action}: {detail}")
+    _update_worker_heartbeat("test", f"{event_type} {action}: {detail}")
     print(f"{event_type} {action}: {detail}")
     return 0 if sent and detail in {"telegram sent", "webhook sent", "duplicate alert skipped"} else 1
 
@@ -240,11 +271,11 @@ def evaluate_once(api, args):
     realtime = sinopac_api.get_realtime_data_from_sinopac(api, product_root=PRODUCT_ROOT)
     raw_kbars, kbars_error = sinopac_api.get_recent_micro_txf_kbars(api, days=args.days)
     if kbars_error:
-        update_heartbeat(WORKER_NAME, "warning", kbars_error)
+        _update_worker_heartbeat("warning", kbars_error)
 
     bars = _resample_completed_bars(raw_kbars)
     if bars.empty:
-        update_heartbeat(WORKER_NAME, "warning", "尚無完整 15 分 K 可計算訊號")
+        _update_worker_heartbeat("warning", _heartbeat_detail(market_status, realtime, bars, message="no completed 15m bar"))
         return None
 
     broker = restore_paper_broker_state(
@@ -277,13 +308,40 @@ def evaluate_once(api, args):
     event_type = _event_type(action, message, broker, current_price)
 
     if action in {"BUY_LONG", "SELL_SHORT"}:
-        risk = evaluate_entry_risk(action, broker, market_status)
+        entry_price, stop_price, take_price = _entry_plan(
+            action,
+            realtime,
+            float(effective_stop_loss_points),
+            float(effective_take_profit_points),
+        )
+        risk = evaluate_entry_risk(
+            action,
+            broker,
+            market_status,
+            min_reward_risk_ratio=args.min_entry_rr,
+            entry_price=entry_price,
+            stop_loss_price=stop_price,
+            take_profit_price=take_price,
+            nearest_resistance=tech_data.get("上方壓力") or 0,
+            nearest_support=tech_data.get("下方支撐") or 0,
+        )
         if not risk.allowed:
-            update_heartbeat(WORKER_NAME, "ok", f"訊號 {action} 被風控擋下：{' / '.join(risk.reasons)}")
+            _update_worker_heartbeat(
+                "ok",
+                _heartbeat_detail(
+                    market_status,
+                    realtime,
+                    bars,
+                    score,
+                    label,
+                    action,
+                    f"entry blocked: {' / '.join(risk.reasons)}",
+                ),
+            )
             return None
 
     if action == "HOLD":
-        update_heartbeat(WORKER_NAME, "ok", message)
+        _update_worker_heartbeat("ok", _heartbeat_detail(market_status, realtime, bars, score, label, action, message))
         return None
 
     entry_price, stop_price, take_price = _entry_plan(
@@ -341,7 +399,10 @@ def evaluate_once(api, args):
     elif sent:
         tracking_detail = " | paper: alert not delivered, tracking skipped"
 
-    update_heartbeat(WORKER_NAME, "ok", f"{event_type} {action}: {detail}{tracking_detail}")
+    _update_worker_heartbeat(
+        "ok",
+        _heartbeat_detail(market_status, realtime, bars, score, label, action, f"{event_type}: {detail}{tracking_detail}"),
+    )
     return signal
 
 
@@ -351,7 +412,7 @@ def run_worker(args):
 
     api, api_error = sinopac_api.get_api(simulation=args.simulation)
     if api_error:
-        update_heartbeat(WORKER_NAME, "error", api_error)
+        _update_worker_heartbeat("error", api_error)
         print(api_error)
         return 1
 
@@ -361,7 +422,7 @@ def run_worker(args):
             if signal:
                 print(f"{datetime.now(TAIPEI):%Y-%m-%d %H:%M:%S} {signal['action']} {signal['score']}")
         except Exception as exc:
-            update_heartbeat(WORKER_NAME, "error", str(exc))
+            _update_worker_heartbeat("error", str(exc))
             print(f"signal_worker error: {exc}")
 
         if args.once:
@@ -370,10 +431,10 @@ def run_worker(args):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="微型臺指背景訊號與警報服務")
-    parser.add_argument("--once", action="store_true", help="只執行一次，供測試用")
-    parser.add_argument("--interval", type=int, default=30, help="輪詢秒數，預設 30 秒")
-    parser.add_argument("--days", type=int, default=90, help="K 線回看天數，預設 90")
+    parser = argparse.ArgumentParser(description="Background signal worker for TMF strategy alerts")
+    parser.add_argument("--once", action="store_true", help="Run one check and exit")
+    parser.add_argument("--interval", type=int, default=30, help="Polling interval in seconds, default 30")
+    parser.add_argument("--days", type=int, default=90, help="Recent kbar history days, default 90")
     parser.add_argument("--simulation", action=argparse.BooleanOptionalAction, default=sinopac_api.get_simulation_default())
     parser.add_argument("--long-entry-score", type=int, default=60)
     parser.add_argument("--short-entry-score", type=int, default=40)
@@ -382,6 +443,7 @@ def parse_args():
     parser.add_argument("--adaptive-risk", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--atr-stop-multiplier", type=float, default=1.2)
     parser.add_argument("--reward-risk-ratio", type=float, default=2.0)
+    parser.add_argument("--min-entry-rr", type=float, default=1.5)
     parser.add_argument("--paper-quantity", type=int, default=1)
     parser.add_argument("--commission-per-side", type=float, default=0.0)
     parser.add_argument("--slippage-points", type=float, default=1.0)
@@ -394,3 +456,4 @@ def parse_args():
 
 if __name__ == "__main__":
     raise SystemExit(run_worker(parse_args()))
+

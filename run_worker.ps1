@@ -1,6 +1,7 @@
 param(
     [switch]$Once,
     [int]$Interval = 30,
+    [double]$MinEntryRR = 1.5,
     [ValidateSet("BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT")]
     [string]$TestSignal = "",
     [ValidateSet("STOP", "TARGET")]
@@ -32,7 +33,7 @@ Write-Host "Installing / updating requirements..."
 & $VenvPython -m pip install --upgrade pip
 & $VenvPip install -r requirements.txt
 
-$ArgsList = @("signal_worker.py", "--interval", "$Interval")
+$ArgsList = @("signal_worker.py", "--interval", "$Interval", "--min-entry-rr", "$MinEntryRR")
 if ($Once) {
     $ArgsList += "--once"
 }

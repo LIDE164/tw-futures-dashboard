@@ -2,6 +2,7 @@ import pandas as pd
 
 from indicators import build_tech_data
 from paper_broker import PaperBroker
+from risk_manager import evaluate_reward_risk
 from scoring import get_decision_score
 from strategy import StrategyManager
 
@@ -137,6 +138,7 @@ def run_backtest(
     adaptive_risk=True,
     atr_stop_multiplier=1.2,
     reward_risk_ratio=2.0,
+    min_entry_rr=1.5,
     signal_timeframe="15min",
     include_institutional=False,
 ):
@@ -215,6 +217,7 @@ def run_backtest(
         action, message = ("HOLD", fill_message) if filled_by_bar else strategy.decide_action(score, current_price)
 
         filled = filled_by_bar
+        rr_ratio = 0.0
         if action != "HOLD" and not filled_by_bar:
             entry_stop, entry_take = _entry_plan(
                 action,
@@ -223,16 +226,31 @@ def run_backtest(
                 float(effective_take_profit_points),
                 float(slippage_points),
             )
-            filled, fill_message = broker.execute(
+            entry_price = next_open + float(slippage_points) if action == "BUY_LONG" else next_open - float(slippage_points)
+            rr_ratio, rr_risk, rr_reward = evaluate_reward_risk(
                 action,
-                next_open,
-                quantity=quantity,
-                note=message,
-                stop_loss_price=entry_stop,
-                take_profit_price=entry_take,
+                entry_price,
+                entry_stop,
+                entry_take,
+                tech_data.get("上方壓力") or 0,
+                tech_data.get("下方支撐") or 0,
             )
-            if filled:
-                strategy.apply_fill(action, next_open, quantity, entry_stop, entry_take)
+            if action in {"BUY_LONG", "SELL_SHORT"} and min_entry_rr and rr_ratio < float(min_entry_rr):
+                action = "HOLD"
+                message = f"風險報酬比 {rr_ratio:.2f}R 低於 {float(min_entry_rr):.2f}R，跳過進場。"
+                fill_message = message
+                filled = False
+            else:
+                filled, fill_message = broker.execute(
+                    action,
+                    next_open,
+                    quantity=quantity,
+                    note=message,
+                    stop_loss_price=entry_stop,
+                    take_profit_price=entry_take,
+                )
+                if filled:
+                    strategy.apply_fill(action, next_open, quantity, entry_stop, entry_take)
 
         unrealized = broker.unrealized_pnl(current_price)
         equity = broker.realized_pnl + unrealized
@@ -253,6 +271,7 @@ def run_backtest(
                 "take_profit_price": broker.take_profit_price,
                 "risk_stop_points": effective_stop_loss_points,
                 "risk_take_points": effective_take_profit_points,
+                "reward_risk_ratio": rr_ratio,
                 "realized_pnl": broker.realized_pnl,
                 "unrealized_pnl": unrealized,
                 "equity": equity,

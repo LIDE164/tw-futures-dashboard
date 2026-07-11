@@ -150,6 +150,8 @@ def build_tech_data(df, realtime=None):
     atr_series = _atr(high, low, close)
     atr_points = _latest(atr_series)
     atr_pct = (atr_points / latest_close * 100) if latest_close else 0.0
+    recent_resistance = _latest(high.shift(1).rolling(40).max(), _latest(high))
+    recent_support = _latest(low.shift(1).rolling(40).min(), _latest(low))
     trend_15m, trend_15m_label = _trend_direction(close)
 
     df_60m = _resample_ohlcv(df, "60min")
@@ -197,6 +199,8 @@ def build_tech_data(df, realtime=None):
         "MA60": ma60_latest,
         "ATR": atr_points,
         "ATR%": atr_pct,
+        "上方壓力": recent_resistance,
+        "下方支撐": recent_support,
         "15分趨勢": trend_15m,
         "15分趨勢文字": trend_15m_label,
         "60分趨勢": trend_60m,
@@ -234,6 +238,8 @@ def fallback_tech_data(realtime=None, reason="尚未取得足夠歷史資料"):
         "MA60": current_price,
         "ATR": 0.0,
         "ATR%": 0.0,
+        "上方壓力": current_price,
+        "下方支撐": current_price,
         "15分趨勢": 0,
         "15分趨勢文字": "資料不足",
         "60分趨勢": 0,

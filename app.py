@@ -219,7 +219,27 @@ def clear_paper_broker_state_safe():
 
 def get_worker_heartbeat_safe():
     func = getattr(storage, "get_worker_heartbeat", None)
-    return func() if func else {}
+    heartbeat = func() if func else {}
+    if heartbeat:
+        return heartbeat
+
+    heartbeat_path = Path("data/signal_worker_heartbeat.txt")
+    if not heartbeat_path.exists():
+        return {}
+
+    result = {}
+    for line in heartbeat_path.read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            result[key.strip()] = value.strip()
+    if result:
+        return {
+            "worker_name": "signal_worker",
+            "updated_at": result.get("updated_at", ""),
+            "status": result.get("status", ""),
+            "detail": result.get("detail", ""),
+        }
+    return {}
 
 
 def get_recent_signals_safe(limit=20):
@@ -547,6 +567,7 @@ with st.sidebar:
     adaptive_risk_mode = st.checkbox("使用 ATR 動態停損 / 停利", value=True)
     atr_stop_multiplier = st.slider("ATR 停損倍數", 0.8, 2.5, 1.2, 0.1)
     reward_risk_ratio = st.slider("停利風險倍數", 1.0, 3.0, 2.0, 0.1)
+    min_entry_rr = st.slider("最低進場風險報酬比", 1.0, 3.0, 1.5, 0.1)
 
     st.divider()
     st.subheader("模擬 / 回測成本")
@@ -708,7 +729,17 @@ trade_plan = build_trade_plan(
     realtime,
     slippage_points,
 )
-risk_decision = evaluate_entry_risk(action, paper_broker, market_status)
+risk_decision = evaluate_entry_risk(
+    action,
+    paper_broker,
+    market_status,
+    min_reward_risk_ratio=min_entry_rr,
+    entry_price=trade_plan["entry_price"] or 0,
+    stop_loss_price=trade_plan["stop_loss"] or 0,
+    take_profit_price=trade_plan["take_profit"] or 0,
+    nearest_resistance=tech_data.get("上方壓力") or 0,
+    nearest_support=tech_data.get("下方支撐") or 0,
+)
 if action in {"BUY_LONG", "SELL_SHORT"} and not risk_decision.allowed:
     trade_plan["title"] = "訊號成立｜風控禁止進場"
     trade_plan["summary"] = "策略訊號成立，但目前新手風控規則禁止進場。"
@@ -797,6 +828,7 @@ with st.container(border=True):
     st.caption(
         f"風控模型：{risk_model_label}｜停損 {effective_stop_loss_points:.0f} 點｜"
         f"停利 {effective_take_profit_points:.0f} 點｜"
+        f"RR {risk_decision.reward_risk_ratio:.2f}R｜"
         f"15分趨勢：{tech_data.get('15分趨勢文字', '未知')}｜"
         f"60分趨勢：{tech_data.get('60分趨勢文字', '未知')}"
     )
@@ -869,6 +901,11 @@ with st.expander("進階摘要", expanded=False):
         f"60分趨勢：{tech_data.get('60分趨勢文字', '未知')}｜"
         f"盤整降權：{'是' if tech_data.get('盤整') else '否'}"
     )
+    st.caption(
+        f"上方壓力：{format_price(tech_data.get('上方壓力'))}｜"
+        f"下方支撐：{format_price(tech_data.get('下方支撐'))}｜"
+        f"最低進場 RR：{min_entry_rr:.2f}R"
+    )
 
 page = st.selectbox(
     "查看更多資訊",
@@ -903,7 +940,7 @@ elif page == "警報服務":
             st.warning("尚未收到本機 signal_worker 心跳。請先啟動 `start_worker.cmd`，或用 `worker_status.cmd` 查看。")
 
     st.write("啟動指令")
-    st.code("python signal_worker.py --interval 30", language="bash")
+    st.code(".\\run_worker.cmd -Interval 30", language="powershell")
     st.write("Windows 背景管理")
     st.code(
         ".\\start_worker.cmd -Interval 30\n"
@@ -913,13 +950,13 @@ elif page == "警報服務":
     )
     st.write("測試發報")
     st.code(
-        "python signal_worker.py --test-signal BUY_LONG\n"
-        "python signal_worker.py --test-signal SELL_SHORT\n"
-        "python signal_worker.py --test-signal CLOSE_LONG\n"
-        "python signal_worker.py --test-signal CLOSE_SHORT\n"
-        "python signal_worker.py --test-signal CLOSE_LONG --test-exit TARGET\n"
-        "python signal_worker.py --test-signal CLOSE_SHORT --test-exit TARGET",
-        language="bash",
+        ".\\run_worker.cmd -TestSignal BUY_LONG\n"
+        ".\\run_worker.cmd -TestSignal SELL_SHORT\n"
+        ".\\run_worker.cmd -TestSignal CLOSE_LONG\n"
+        ".\\run_worker.cmd -TestSignal CLOSE_SHORT\n"
+        ".\\run_worker.cmd -TestSignal CLOSE_LONG -TestExit TARGET\n"
+        ".\\run_worker.cmd -TestSignal CLOSE_SHORT -TestExit TARGET",
+        language="powershell",
     )
 
     recent_signals = get_recent_signals_safe(20)
@@ -1045,6 +1082,7 @@ elif page == "回測系統":
             adaptive_risk=adaptive_risk_mode,
             atr_stop_multiplier=atr_stop_multiplier,
             reward_risk_ratio=reward_risk_ratio,
+            min_entry_rr=min_entry_rr,
             signal_timeframe=SIGNAL_TIMEFRAME,
             include_institutional=False,
         )

@@ -45,31 +45,31 @@ SJ_SIMULATION=true
 - 停損與停利會寫入模擬持倉，並在策略與回測中實際觸發
 - 模擬帳本會保存到 `data/trading.db`，重啟 Streamlit 後仍可還原模擬部位
 
-目前仍不是常駐警報服務；若沒有人開啟或刷新 Streamlit，系統不會保證背景持續監控行情。
+Streamlit 頁面只負責顯示；真正的背景監控請另外啟動 `signal_worker.py`。
 
 ## 背景警報服務
 
 第一版背景服務使用 `signal_worker.py`，會定期輪詢永豐 snapshot 與最近 K 線：
 
-```bash
-python signal_worker.py --interval 30
+```powershell
+.\run_worker.cmd -Interval 30
 ```
 
 測試單次執行：
 
-```bash
-python signal_worker.py --once
+```powershell
+.\run_worker.cmd -Once
 ```
 
 測試 Telegram 策略訊號發報：
 
-```bash
-python signal_worker.py --test-signal BUY_LONG
-python signal_worker.py --test-signal SELL_SHORT
-python signal_worker.py --test-signal CLOSE_LONG
-python signal_worker.py --test-signal CLOSE_SHORT
-python signal_worker.py --test-signal CLOSE_LONG --test-exit TARGET
-python signal_worker.py --test-signal CLOSE_SHORT --test-exit TARGET
+```powershell
+.\run_worker.cmd -TestSignal BUY_LONG
+.\run_worker.cmd -TestSignal SELL_SHORT
+.\run_worker.cmd -TestSignal CLOSE_LONG
+.\run_worker.cmd -TestSignal CLOSE_SHORT
+.\run_worker.cmd -TestSignal CLOSE_LONG -TestExit TARGET
+.\run_worker.cmd -TestSignal CLOSE_SHORT -TestExit TARGET
 ```
 
 這些測試指令只會送出測試通知與寫入本機紀錄，不會送出真實委託。
@@ -77,22 +77,22 @@ python signal_worker.py --test-signal CLOSE_SHORT --test-exit TARGET
 Windows 本機建議使用專案附的 PowerShell 腳本，它會自動建立 `.venv` 並安裝 `requirements.txt`：
 
 ```powershell
-.\run_worker.ps1 -Once
+.\run_worker.cmd -Once
 ```
 
 測試策略訊號：
 
 ```powershell
-.\run_worker.ps1 -TestSignal BUY_LONG
-.\run_worker.ps1 -TestSignal SELL_SHORT
-.\run_worker.ps1 -TestSignal CLOSE_LONG
-.\run_worker.ps1 -TestSignal CLOSE_LONG -TestExit TARGET
+.\run_worker.cmd -TestSignal BUY_LONG
+.\run_worker.cmd -TestSignal SELL_SHORT
+.\run_worker.cmd -TestSignal CLOSE_LONG
+.\run_worker.cmd -TestSignal CLOSE_LONG -TestExit TARGET
 ```
 
 常駐執行：
 
 ```powershell
-.\run_worker.ps1 -Interval 30
+.\run_worker.cmd -Interval 30
 ```
 
 背景啟動、查看與停止：
@@ -112,6 +112,8 @@ VS Code Terminal 若無法執行 `.ps1`，請改用 `.cmd`：
 ```
 
 注意：Streamlit Cloud 網頁讀不到你本機 `data/trading.db`，因此無法代表本機 worker 是否正在發報。要查看本機狀態，請用 `.\worker_status.cmd` 或本機 `streamlit run app.py`。
+
+啟動新版 worker 後，即使休市也會寫入 `data/signal_worker_heartbeat.txt`。用 `.\worker_status.cmd` 看到 `updated_at` 每 30 秒左右更新，就代表 worker 有在讀行情、K 線並執行判斷；開盤後同一個心跳會顯示最新價格、最新完整 15 分 K、分數與 action。
 
 如果 PowerShell 不允許執行腳本，可先在同一個 Terminal 執行：
 
