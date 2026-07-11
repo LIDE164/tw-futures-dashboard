@@ -144,6 +144,7 @@ def build_tech_data(df, realtime=None):
     prev_hist = float(hist.iloc[-2]) if len(hist) >= 2 and not pd.isna(hist.iloc[-2]) else 0.0
     latest_volume = _latest(volume, realtime.get("volume", 0.0))
     avg_volume = _latest(volume.rolling(5).mean(), latest_volume)
+    volume_ratio = latest_volume / avg_volume if avg_volume > 0 else 0.0
     ma20_latest = _latest(ma20, latest_close)
     ma60 = close.rolling(60).mean()
     ma60_latest = _latest(ma60, ma20_latest)
@@ -170,6 +171,8 @@ def build_tech_data(df, realtime=None):
     support_retest = bool(touched_support and reclaimed_support and bullish_close)
     close_below_ma20 = latest_close > 0 and ma20_latest > 0 and latest_close < ma20_latest
     close_above_ma20 = latest_close > 0 and ma20_latest > 0 and latest_close > ma20_latest
+    distance_from_ma20 = latest_close - ma20_latest if latest_close > 0 and ma20_latest > 0 else 0.0
+    distance_from_ma20_atr = abs(distance_from_ma20) / atr_points if atr_points > 0 else 0.0
     macd_improving = latest_hist > prev_hist
     macd_weakening = latest_hist < prev_hist
     macd_bullish = latest_hist > 0 and macd_improving
@@ -193,10 +196,13 @@ def build_tech_data(df, realtime=None):
         "前日MACD柱": prev_hist,
         "成交量": latest_volume,
         "5日均量": avg_volume,
+        "量比": volume_ratio,
         "訊號": latest_hist > prev_hist,
         "ADX": _adx(high, low, close),
         "MA20": ma20_latest,
         "MA60": ma60_latest,
+        "距MA20": distance_from_ma20,
+        "距MA20_ATR": distance_from_ma20_atr,
         "ATR": atr_points,
         "ATR%": atr_pct,
         "上方壓力": recent_resistance,
@@ -232,10 +238,13 @@ def fallback_tech_data(realtime=None, reason="尚未取得足夠歷史資料"):
         "前日MACD柱": 0.0,
         "成交量": volume,
         "5日均量": volume,
+        "量比": 0.0,
         "訊號": False,
         "ADX": 0.0,
         "MA20": current_price,
         "MA60": current_price,
+        "距MA20": 0.0,
+        "距MA20_ATR": 0.0,
         "ATR": 0.0,
         "ATR%": 0.0,
         "上方壓力": current_price,

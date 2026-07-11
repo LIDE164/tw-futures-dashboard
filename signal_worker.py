@@ -294,6 +294,8 @@ def evaluate_once(api, args):
         short_entry_score=args.short_entry_score,
         stop_loss_points=effective_stop_loss_points,
         take_profit_points=effective_take_profit_points,
+        score_exit_requires_profit=args.score_exit_requires_profit,
+        min_score_exit_profit_points=args.min_score_exit_profit_points,
     )
     strategy.sync_position(
         broker.position,
@@ -306,8 +308,46 @@ def evaluate_once(api, args):
     current_price = float(realtime.get("current_price") or 0)
     action, message = strategy.decide_action(score, current_price)
     event_type = _event_type(action, message, broker, current_price)
+    if action == "BUY_LONG" and not args.allow_long:
+        _update_worker_heartbeat("ok", _heartbeat_detail(market_status, realtime, bars, score, label, action, "entry blocked: long side disabled"))
+        return None
+    if action == "SELL_SHORT" and not args.allow_short:
+        _update_worker_heartbeat("ok", _heartbeat_detail(market_status, realtime, bars, score, label, action, "entry blocked: short side disabled"))
+        return None
 
     if action in {"BUY_LONG", "SELL_SHORT"}:
+        if int(args.confirmation_bars) >= 2 and len(bars) >= 2:
+            prev_history = bars.iloc[:-1].copy()
+            prev_close = float(prev_history["Close"].iloc[-1])
+            prev_realtime = {
+                "current_price": prev_close,
+                "volume": float(prev_history["Volume"].iloc[-1]),
+                "vwap": prev_close,
+            }
+            prev_tech = build_tech_data(prev_history, prev_realtime)
+            prev_score, _, _, _ = get_decision_score(prev_tech, inst_data={}, with_reason=True)
+            missing_confirmation = (
+                action == "BUY_LONG"
+                and prev_score < int(args.long_entry_score)
+            ) or (
+                action == "SELL_SHORT"
+                and prev_score > int(args.short_entry_score)
+            )
+            if missing_confirmation:
+                _update_worker_heartbeat(
+                    "ok",
+                    _heartbeat_detail(
+                        market_status,
+                        realtime,
+                        bars,
+                        score,
+                        label,
+                        action,
+                        f"entry blocked: previous score {prev_score} did not confirm",
+                    ),
+                )
+                return None
+
         entry_price, stop_price, take_price = _entry_plan(
             action,
             realtime,
@@ -324,6 +364,12 @@ def evaluate_once(api, args):
             take_profit_price=take_price,
             nearest_resistance=tech_data.get("上方壓力") or 0,
             nearest_support=tech_data.get("下方支撐") or 0,
+            tech_data=tech_data,
+            reject_choppy=args.reject_choppy,
+            require_60m_alignment=args.require_60m_alignment,
+            min_adx=args.min_adx,
+            min_volume_ratio=args.min_volume_ratio,
+            max_chase_atr=args.max_chase_atr,
         )
         if not risk.allowed:
             _update_worker_heartbeat(
@@ -444,6 +490,16 @@ def parse_args():
     parser.add_argument("--atr-stop-multiplier", type=float, default=1.2)
     parser.add_argument("--reward-risk-ratio", type=float, default=2.0)
     parser.add_argument("--min-entry-rr", type=float, default=1.5)
+    parser.add_argument("--reject-choppy", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--require-60m-alignment", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--min-adx", type=float, default=20)
+    parser.add_argument("--min-volume-ratio", type=float, default=0.85)
+    parser.add_argument("--max-chase-atr", type=float, default=1.4)
+    parser.add_argument("--confirmation-bars", type=int, default=2)
+    parser.add_argument("--allow-long", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--allow-short", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--score-exit-requires-profit", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--min-score-exit-profit-points", type=float, default=0)
     parser.add_argument("--paper-quantity", type=int, default=1)
     parser.add_argument("--commission-per-side", type=float, default=0.0)
     parser.add_argument("--slippage-points", type=float, default=1.0)

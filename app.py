@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 import charting
-from backtester import run_backtest
+from backtester import optimize_backtest_parameters, optimize_then_validate, run_backtest
 from indicators import build_tech_data
 from market_session import TAIPEI, format_datetime, get_market_status
 from market_data import get_public_market_data
@@ -536,12 +536,22 @@ def load_public_market_data():
     return get_public_market_data()
 
 
-def configure_strategy(strategy, long_entry_score, short_entry_score, stop_loss_points, take_profit_points):
+def configure_strategy(
+    strategy,
+    long_entry_score,
+    short_entry_score,
+    stop_loss_points,
+    take_profit_points,
+    score_exit_requires_profit=False,
+    min_score_exit_profit_points=0,
+):
     strategy.update_config(
         long_entry_score=long_entry_score,
         short_entry_score=short_entry_score,
         stop_loss_points=stop_loss_points,
         take_profit_points=take_profit_points,
+        score_exit_requires_profit=score_exit_requires_profit,
+        min_score_exit_profit_points=min_score_exit_profit_points,
     )
 
 
@@ -578,6 +588,20 @@ with st.sidebar:
     atr_stop_multiplier = st.slider("ATR 停損倍數", 0.8, 2.5, 1.2, 0.1)
     reward_risk_ratio = st.slider("停利風險倍數", 1.0, 3.0, 2.0, 0.1)
     min_entry_rr = st.slider("最低進場風險報酬比", 1.0, 3.0, 1.5, 0.1)
+    reject_choppy_entry = st.checkbox("盤整盤禁止新進場", value=True)
+    require_60m_alignment = st.checkbox("進場需符合 60 分趨勢", value=True)
+    min_entry_adx = st.slider("最低 ADX 趨勢強度", 10, 35, 20)
+    min_entry_volume_ratio = st.slider("最低量比", 0.5, 1.5, 0.85, 0.05)
+    max_chase_atr = st.slider("最大追價距離 ATR", 0.5, 3.0, 1.4, 0.1)
+    confirmation_bars = st.slider("進場連續確認 K 數", 1, 3, 2)
+    cooldown_bars = st.slider("平倉後冷卻 K 數", 0, 5, 1)
+    allow_long = st.checkbox("允許做多", value=True)
+    allow_short = st.checkbox("允許做空", value=True)
+    breakeven_trigger_r = st.slider("保本觸發 R", 0.0, 2.0, 0.7, 0.1)
+    breakeven_buffer_points = st.number_input("保本加點", min_value=0.0, max_value=50.0, value=0.0, step=1.0)
+    max_holding_bars = st.slider("最長持倉 K 數", 0, 60, 0)
+    score_exit_requires_profit = st.checkbox("評分反轉出場需先浮盈", value=True)
+    min_score_exit_profit_points = st.number_input("評分出場最低浮盈點", min_value=0.0, max_value=200.0, value=0.0, step=5.0)
 
     st.divider()
     st.subheader("模擬 / 回測成本")
@@ -672,6 +696,8 @@ configure_strategy(
     short_entry_score,
     effective_stop_loss_points,
     effective_take_profit_points,
+    score_exit_requires_profit,
+    min_score_exit_profit_points,
 )
 
 if "paper_broker" not in st.session_state:
@@ -749,6 +775,12 @@ risk_decision = evaluate_entry_risk_compatible(
     take_profit_price=trade_plan["take_profit"] or 0,
     nearest_resistance=tech_data.get("上方壓力") or 0,
     nearest_support=tech_data.get("下方支撐") or 0,
+    tech_data=tech_data,
+    reject_choppy=reject_choppy_entry,
+    require_60m_alignment=require_60m_alignment,
+    min_adx=min_entry_adx,
+    min_volume_ratio=min_entry_volume_ratio,
+    max_chase_atr=max_chase_atr,
 )
 if action in {"BUY_LONG", "SELL_SHORT"} and not getattr(risk_decision, "allowed", False):
     trade_plan["title"] = "訊號成立｜風控禁止進場"
@@ -921,6 +953,17 @@ with st.expander("進階摘要", expanded=False):
         f"上方壓力：{format_price(tech_data.get('上方壓力'))}｜"
         f"下方支撐：{format_price(tech_data.get('下方支撐'))}｜"
         f"最低進場 RR：{min_entry_rr:.2f}R"
+    )
+    st.caption(
+        f"進場過濾：ADX≥{min_entry_adx}｜量比≥{min_entry_volume_ratio:.2f}｜"
+        f"追價≤{max_chase_atr:.1f}ATR｜"
+        f"{'避開盤整' if reject_choppy_entry else '允許盤整'}｜"
+        f"{'需順60分' if require_60m_alignment else '不檢查60分'}｜"
+        f"確認{confirmation_bars}根｜冷卻{cooldown_bars}根｜"
+        f"{'做多' if allow_long else '停多'} / {'做空' if allow_short else '停空'}｜"
+        f"保本{breakeven_trigger_r:.1f}R+{breakeven_buffer_points:.0f}｜"
+        f"最長{max_holding_bars if max_holding_bars else '不限'}K｜"
+        f"{'評分出場需浮盈' if score_exit_requires_profit else '評分反轉即出'}"
     )
 
 page = st.selectbox(
@@ -1099,6 +1142,20 @@ elif page == "回測系統":
             atr_stop_multiplier=atr_stop_multiplier,
             reward_risk_ratio=reward_risk_ratio,
             min_entry_rr=min_entry_rr,
+            reject_choppy=reject_choppy_entry,
+            require_60m_alignment=require_60m_alignment,
+            min_adx=min_entry_adx,
+            min_volume_ratio=min_entry_volume_ratio,
+            max_chase_atr=max_chase_atr,
+            confirmation_bars=confirmation_bars,
+            cooldown_bars=cooldown_bars,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            breakeven_trigger_r=breakeven_trigger_r,
+            breakeven_buffer_points=breakeven_buffer_points,
+            max_holding_bars=max_holding_bars,
+            score_exit_requires_profit=score_exit_requires_profit,
+            min_score_exit_profit_points=min_score_exit_profit_points,
             signal_timeframe=SIGNAL_TIMEFRAME,
             include_institutional=False,
         )
@@ -1110,8 +1167,28 @@ elif page == "回測系統":
             r1.metric("總損益", f"{summary['總損益']:,.0f}")
             r2.metric("交易次數", summary["交易次數"])
             r3, r4 = st.columns(2)
-            r3.metric("勝率", f"{summary['勝率']:.2f}%")
+            r3.metric("勝率", f"{summary['勝率']:.2f}%", f"90%下限 {summary.get('勝率可信下限90', 0):.2f}%")
             r4.metric("最大回撤", f"{summary['最大回撤']:,.0f}")
+            r5, r6 = st.columns(2)
+            r5.metric("期望值/筆", f"{summary.get('期望值', 0):,.0f}")
+            r6.metric("Profit Factor", f"{summary.get('Profit Factor', 0):.2f}")
+            if summary.get("勝率", 0) >= 60 and summary.get("期望值", 0) <= 0:
+                st.warning("勝率雖然達 60%，但期望值不是正數，這不是可採用的改善。")
+            elif summary.get("勝率", 0) >= 60 and summary.get("勝率可信下限90", 0) < 45:
+                st.warning("勝率表面達 60%，但交易樣本仍不夠穩，90%可信下限偏低。")
+            elif summary.get("勝率", 0) >= 60 and summary.get("期望值", 0) > 0 and summary.get("Profit Factor", 0) >= 1.2:
+                st.success("目前參數在這段資料達到勝率、期望值與 Profit Factor 門檻，請再做樣本外驗證。")
+            r7, r8 = st.columns(2)
+            r7.metric("多單勝率", f"{summary.get('多單勝率', 0):.2f}%", f"{summary.get('多單交易次數', 0)} 筆")
+            r8.metric("空單勝率", f"{summary.get('空單勝率', 0):.2f}%", f"{summary.get('空單交易次數', 0)} 筆")
+
+            st.subheader("回測診斷")
+            d1, d2, d3 = st.columns(3)
+            d1.metric("停損", summary.get("停損次數", 0), f"{summary.get('停損損益', 0):,.0f}")
+            d2.metric("停利", summary.get("停利次數", 0), f"{summary.get('停利損益', 0):,.0f}")
+            d3.metric("策略平倉", summary.get("策略平倉次數", 0), f"{summary.get('策略平倉損益', 0):,.0f}")
+            for item in summary.get("診斷", []):
+                st.write(f"- {item}")
             st.write(summary)
             if not equity_curve.empty:
                 st.line_chart(equity_curve.set_index("bar")["equity"])
@@ -1119,6 +1196,93 @@ elif page == "回測系統":
             if not trades.empty:
                 st.subheader("交易明細")
                 st.dataframe(trades, use_container_width=True)
+
+            st.subheader("參數掃描")
+            st.caption(
+                "掃描會比較高勝率型、平衡型、趨勢型參數。"
+                "請優先看「達標 / 期望值 / Profit Factor / 交易次數」，不要只看勝率。"
+            )
+            min_scan_trades = st.number_input("掃描至少交易筆數", min_value=1, max_value=50, value=5, step=1)
+            if st.button("掃描提高期望值參數", use_container_width=True):
+                backtest_base_kwargs = {
+                    "inst_data": {},
+                    "quantity": paper_quantity,
+                    "multiplier": contract_multiplier,
+                    "commission_per_side": commission_per_side,
+                    "slippage_points": slippage_points,
+                    "stop_loss_points": stop_loss_points,
+                    "take_profit_points": take_profit_points,
+                    "adaptive_risk": adaptive_risk_mode,
+                    "atr_stop_multiplier": atr_stop_multiplier,
+                    "reward_risk_ratio": reward_risk_ratio,
+                    "min_volume_ratio": min_entry_volume_ratio,
+                    "confirmation_bars": confirmation_bars,
+                    "cooldown_bars": cooldown_bars,
+                    "allow_long": allow_long,
+                    "allow_short": allow_short,
+                    "breakeven_trigger_r": breakeven_trigger_r,
+                    "breakeven_buffer_points": breakeven_buffer_points,
+                    "max_holding_bars": max_holding_bars,
+                    "score_exit_requires_profit": score_exit_requires_profit,
+                    "min_score_exit_profit_points": min_score_exit_profit_points,
+                    "signal_timeframe": SIGNAL_TIMEFRAME,
+                    "include_institutional": False,
+                }
+                optimized = optimize_backtest_parameters(
+                    raw_kbars,
+                    base_kwargs=backtest_base_kwargs,
+                    min_trades=min_scan_trades,
+                    top_n=10,
+                )
+                if optimized.empty:
+                    st.warning("沒有找到符合最低交易筆數的參數組合。可降低最低交易筆數，或放寬 ADX/RR/追價限制。")
+                else:
+                    st.dataframe(optimized, use_container_width=True)
+                    hit_count = int(optimized["可信達標"].sum()) if "可信達標" in optimized.columns else 0
+                    if hit_count:
+                        st.success(f"找到 {hit_count} 組訓練段可信達標組合。下一步請按樣本外驗證確認是否沒有過度最佳化。")
+                    else:
+                        st.info("目前訓練段尚未找到可信達標組合，可降低最低交易筆數、等待更多 K 線樣本，或接受較低勝率但正期望值的趨勢型策略。")
+
+            if st.button("訓練 / 樣本外驗證", use_container_width=True):
+                validation = optimize_then_validate(
+                    raw_kbars,
+                    base_kwargs={
+                        "inst_data": {},
+                        "quantity": paper_quantity,
+                        "multiplier": contract_multiplier,
+                        "commission_per_side": commission_per_side,
+                        "slippage_points": slippage_points,
+                        "stop_loss_points": stop_loss_points,
+                        "take_profit_points": take_profit_points,
+                        "adaptive_risk": adaptive_risk_mode,
+                        "atr_stop_multiplier": atr_stop_multiplier,
+                        "reward_risk_ratio": reward_risk_ratio,
+                        "min_volume_ratio": min_entry_volume_ratio,
+                        "confirmation_bars": confirmation_bars,
+                        "cooldown_bars": cooldown_bars,
+                        "allow_long": allow_long,
+                        "allow_short": allow_short,
+                        "breakeven_trigger_r": breakeven_trigger_r,
+                        "breakeven_buffer_points": breakeven_buffer_points,
+                        "max_holding_bars": max_holding_bars,
+                        "score_exit_requires_profit": score_exit_requires_profit,
+                        "min_score_exit_profit_points": min_score_exit_profit_points,
+                        "signal_timeframe": SIGNAL_TIMEFRAME,
+                        "include_institutional": False,
+                    },
+                    min_trades=min_scan_trades,
+                    top_n=5,
+                )
+                if validation.empty:
+                    st.warning("樣本外資料或交易筆數不足，無法完成訓練/驗證。請增加 K 線天數或降低最低交易筆數。")
+                else:
+                    st.dataframe(validation, use_container_width=True)
+                    oos_hit_count = int(validation["樣本外可信達標"].sum()) if "樣本外可信達標" in validation.columns else 0
+                    if oos_hit_count:
+                        st.success(f"有 {oos_hit_count} 組樣本外可信達標，才比較接近可用策略。")
+                    else:
+                        st.warning("目前沒有樣本外可信達標組合；不要只採用訓練段勝率漂亮的參數。")
 
 elif page == "帳務參考":
     st.subheader("永豐帳務參考")

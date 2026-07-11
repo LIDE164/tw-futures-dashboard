@@ -2,7 +2,7 @@ import pandas as pd
 
 from indicators import build_tech_data
 from paper_broker import PaperBroker
-from risk_manager import evaluate_reward_risk
+from risk_manager import evaluate_reward_risk, evaluate_signal_quality
 from scoring import get_decision_score
 from strategy import StrategyManager
 
@@ -124,6 +124,89 @@ def _check_bar_exit(broker, bar, conservative=True):
     return None, None, ""
 
 
+def _open_entry_bar(trades):
+    entry_bar = None
+    for trade in trades:
+        action = getattr(trade, "action", "")
+        trade_bar = getattr(trade, "bar", None)
+        if action in {"BUY_LONG", "SELL_SHORT"} and pd.notna(trade_bar):
+            entry_bar = int(trade_bar)
+        elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
+            entry_bar = None
+    return entry_bar
+
+
+def _maybe_apply_breakeven_stop(broker, bar, trigger_r=0.7, buffer_points=0):
+    if broker.position == 0 or not trigger_r:
+        return
+
+    entry_price = float(broker.entry_price or 0)
+    stop_price = float(broker.stop_loss_price or 0)
+    if entry_price <= 0 or stop_price <= 0:
+        return
+
+    bar_high = float(bar["High"])
+    bar_low = float(bar["Low"])
+    buffer_points = float(buffer_points or 0)
+
+    if broker.position > 0:
+        risk_points = entry_price - stop_price
+        trigger_price = entry_price + risk_points * float(trigger_r)
+        breakeven_stop = entry_price + buffer_points
+        if risk_points > 0 and bar_high >= trigger_price and stop_price < breakeven_stop:
+            broker.stop_loss_price = breakeven_stop
+
+    if broker.position < 0:
+        risk_points = stop_price - entry_price
+        trigger_price = entry_price - risk_points * float(trigger_r)
+        breakeven_stop = entry_price - buffer_points
+        if risk_points > 0 and bar_low <= trigger_price and stop_price > breakeven_stop:
+            broker.stop_loss_price = breakeven_stop
+
+
+def _empty_summary():
+    return {
+        "交易次數": 0,
+        "總損益": 0,
+        "勝率": 0,
+        "勝率可信下限90": 0,
+        "期望值": 0,
+        "平均獲利": 0,
+        "平均虧損": 0,
+        "盈虧比": 0,
+        "Profit Factor": 0,
+        "最大回撤": 0,
+        "最大連虧次數": 0,
+        "平均持倉K棒數": 0,
+        "多單損益": 0,
+        "空單損益": 0,
+        "多單勝率": 0,
+        "空單勝率": 0,
+        "多單交易次數": 0,
+        "空單交易次數": 0,
+        "停損次數": 0,
+        "停利次數": 0,
+        "策略平倉次數": 0,
+        "停損損益": 0,
+        "停利損益": 0,
+        "策略平倉損益": 0,
+        "診斷": [],
+    }
+
+
+def _wilson_lower_bound(wins, total, z=1.64):
+    total = int(total or 0)
+    wins = int(wins or 0)
+    if total <= 0:
+        return 0.0
+    phat = wins / total
+    z2 = z * z
+    denominator = 1 + z2 / total
+    center = phat + z2 / (2 * total)
+    margin = z * ((phat * (1 - phat) + z2 / (4 * total)) / total) ** 0.5
+    return max(0.0, min(100.0, ((center - margin) / denominator) * 100))
+
+
 def run_backtest(
     df,
     inst_data=None,
@@ -139,6 +222,20 @@ def run_backtest(
     atr_stop_multiplier=1.2,
     reward_risk_ratio=2.0,
     min_entry_rr=1.5,
+    reject_choppy=True,
+    require_60m_alignment=True,
+    min_adx=20,
+    min_volume_ratio=0.85,
+    max_chase_atr=1.4,
+    confirmation_bars=2,
+    cooldown_bars=1,
+    allow_long=True,
+    allow_short=True,
+    breakeven_trigger_r=0.7,
+    breakeven_buffer_points=0,
+    max_holding_bars=0,
+    score_exit_requires_profit=True,
+    min_score_exit_profit_points=0,
     signal_timeframe="15min",
     include_institutional=False,
 ):
@@ -159,6 +256,8 @@ def run_backtest(
         short_entry_score=short_entry_score,
         stop_loss_points=stop_loss_points,
         take_profit_points=take_profit_points,
+        score_exit_requires_profit=score_exit_requires_profit,
+        min_score_exit_profit_points=min_score_exit_profit_points,
     )
     broker = PaperBroker(
         multiplier=multiplier,
@@ -166,6 +265,7 @@ def run_backtest(
         slippage_points=slippage_points,
     )
     records = []
+    cooldown_until_bar = -1
 
     for i in range(60, len(df) - 1):
         bar = df.iloc[i]
@@ -176,7 +276,11 @@ def run_backtest(
         if exit_action:
             filled_by_bar, fill_message = broker.execute(exit_action, exit_price, quantity=quantity, note=exit_note)
             if filled_by_bar:
+                setattr(broker.trades[-1], "bar", i)
                 strategy.reset()
+                cooldown_until_bar = max(cooldown_until_bar, i + int(cooldown_bars))
+        elif broker.position != 0:
+            _maybe_apply_breakeven_stop(broker, bar, breakeven_trigger_r, breakeven_buffer_points)
 
         history = df.iloc[: i + 1].copy()
         current_price = float(history["Close"].iloc[-1])
@@ -208,6 +312,8 @@ def run_backtest(
             short_entry_score=short_entry_score,
             stop_loss_points=effective_stop_loss_points,
             take_profit_points=effective_take_profit_points,
+            score_exit_requires_profit=score_exit_requires_profit,
+            min_score_exit_profit_points=min_score_exit_profit_points,
         )
         score, label, reasons, feature = get_decision_score(
             tech_data,
@@ -215,6 +321,32 @@ def run_backtest(
             with_reason=True,
         )
         action, message = ("HOLD", fill_message) if filled_by_bar else strategy.decide_action(score, current_price)
+        entry_bar = _open_entry_bar(broker.trades)
+        holding_bars = i - entry_bar if broker.position != 0 and entry_bar is not None else 0
+        if (
+            not filled_by_bar
+            and max_holding_bars
+            and broker.position > 0
+            and holding_bars >= int(max_holding_bars)
+            and current_price > broker.entry_price
+        ):
+            action = "CLOSE_LONG"
+            message = f"持倉 {holding_bars} 根 K 後仍未到停利，先以獲利出場。"
+        elif (
+            not filled_by_bar
+            and max_holding_bars
+            and broker.position < 0
+            and holding_bars >= int(max_holding_bars)
+            and current_price < broker.entry_price
+        ):
+            action = "CLOSE_SHORT"
+            message = f"持倉 {holding_bars} 根 K 後仍未到停利，先以獲利回補。"
+        if action == "BUY_LONG" and not allow_long:
+            action = "HOLD"
+            message = "目前設定停用多單，跳過做多訊號。"
+        elif action == "SELL_SHORT" and not allow_short:
+            action = "HOLD"
+            message = "目前設定停用空單，跳過做空訊號。"
 
         filled = filled_by_bar
         rr_ratio = 0.0
@@ -240,6 +372,90 @@ def run_backtest(
                 message = f"風險報酬比 {rr_ratio:.2f}R 低於 {float(min_entry_rr):.2f}R，跳過進場。"
                 fill_message = message
                 filled = False
+            elif action in {"BUY_LONG", "SELL_SHORT"} and i <= cooldown_until_bar:
+                action = "HOLD"
+                message = f"剛平倉後冷卻 {int(cooldown_bars)} 根 K，跳過新進場。"
+                fill_message = message
+                filled = False
+            elif action in {"BUY_LONG", "SELL_SHORT"} and int(confirmation_bars) >= 2:
+                prev_history = df.iloc[:i].copy()
+                prev_realtime = {
+                    "current_price": float(prev_history["Close"].iloc[-1]),
+                    "volume": float(prev_history["Volume"].iloc[-1]),
+                    "vwap": float(prev_history["Close"].iloc[-1]),
+                }
+                prev_tech = build_tech_data(prev_history, prev_realtime)
+                prev_score, _, _, _ = get_decision_score(
+                    prev_tech,
+                    inst_data=inst_data or {} if include_institutional else {},
+                    with_reason=True,
+                )
+                missing_confirmation = (
+                    action == "BUY_LONG"
+                    and prev_score < int(long_entry_score)
+                ) or (
+                    action == "SELL_SHORT"
+                    and prev_score > int(short_entry_score)
+                )
+                if missing_confirmation:
+                    action = "HOLD"
+                    message = f"上一根分數 {prev_score} 未連續確認方向，跳過進場。"
+                    fill_message = message
+                    filled = False
+                else:
+                    quality_reasons = evaluate_signal_quality(
+                        action,
+                        tech_data,
+                        reject_choppy=reject_choppy,
+                        require_60m_alignment=require_60m_alignment,
+                        min_adx=min_adx,
+                        min_volume_ratio=min_volume_ratio,
+                        max_chase_atr=max_chase_atr,
+                    )
+                    if quality_reasons:
+                        action = "HOLD"
+                        message = " / ".join(quality_reasons)
+                        fill_message = message
+                        filled = False
+                    else:
+                        filled, fill_message = broker.execute(
+                            action,
+                            next_open,
+                            quantity=quantity,
+                            note=message,
+                            stop_loss_price=entry_stop,
+                            take_profit_price=entry_take,
+                        )
+                        if filled:
+                            setattr(broker.trades[-1], "bar", i + 1)
+                            strategy.apply_fill(action, next_open, quantity, entry_stop, entry_take)
+            elif action in {"BUY_LONG", "SELL_SHORT"}:
+                quality_reasons = evaluate_signal_quality(
+                    action,
+                    tech_data,
+                    reject_choppy=reject_choppy,
+                    require_60m_alignment=require_60m_alignment,
+                    min_adx=min_adx,
+                    min_volume_ratio=min_volume_ratio,
+                    max_chase_atr=max_chase_atr,
+                )
+                if quality_reasons:
+                    action = "HOLD"
+                    message = " / ".join(quality_reasons)
+                    fill_message = message
+                    filled = False
+                else:
+                    filled, fill_message = broker.execute(
+                        action,
+                        next_open,
+                        quantity=quantity,
+                        note=message,
+                        stop_loss_price=entry_stop,
+                        take_profit_price=entry_take,
+                    )
+                    if filled:
+                        setattr(broker.trades[-1], "bar", i + 1)
+                        strategy.apply_fill(action, next_open, quantity, entry_stop, entry_take)
             else:
                 filled, fill_message = broker.execute(
                     action,
@@ -250,7 +466,10 @@ def run_backtest(
                     take_profit_price=entry_take,
                 )
                 if filled:
+                    setattr(broker.trades[-1], "bar", i + 1)
                     strategy.apply_fill(action, next_open, quantity, entry_stop, entry_take)
+                    if action in {"CLOSE_LONG", "CLOSE_SHORT"}:
+                        cooldown_until_bar = max(cooldown_until_bar, i + int(cooldown_bars))
 
         unrealized = broker.unrealized_pnl(current_price)
         equity = broker.realized_pnl + unrealized
@@ -281,7 +500,9 @@ def run_backtest(
     if broker.position != 0 and len(df) > 0:
         last_close = float(df["Close"].iloc[-1])
         final_action = "CLOSE_LONG" if broker.position > 0 else "CLOSE_SHORT"
-        broker.execute(final_action, last_close, quantity=abs(broker.position), note="回測結束強制平倉")
+        filled, _ = broker.execute(final_action, last_close, quantity=abs(broker.position), note="回測結束強制平倉")
+        if filled:
+            setattr(broker.trades[-1], "bar", len(df) - 1)
 
     trades = broker.trades_df()
     equity_curve = pd.DataFrame(records)
@@ -291,35 +512,11 @@ def run_backtest(
 
 def summarize_backtest(trades, equity_curve):
     if trades.empty:
-        return {
-            "交易次數": 0,
-            "總損益": 0,
-            "勝率": 0,
-            "平均獲利": 0,
-            "平均虧損": 0,
-            "盈虧比": 0,
-            "最大回撤": 0,
-            "最大連虧次數": 0,
-            "平均持倉K棒數": 0,
-            "多單損益": 0,
-            "空單損益": 0,
-        }
+        return _empty_summary()
 
     close_trades = trades[trades["pnl"] != 0].copy()
     if close_trades.empty:
-        return {
-            "交易次數": 0,
-            "總損益": 0,
-            "勝率": 0,
-            "平均獲利": 0,
-            "平均虧損": 0,
-            "盈虧比": 0,
-            "最大回撤": 0,
-            "最大連虧次數": 0,
-            "平均持倉K棒數": 0,
-            "多單損益": 0,
-            "空單損益": 0,
-        }
+        return _empty_summary()
 
     total_pnl = close_trades["pnl"].sum()
     winners = close_trades[close_trades["pnl"] > 0]
@@ -327,6 +524,10 @@ def summarize_backtest(trades, equity_curve):
     avg_win = winners["pnl"].mean() if not winners.empty else 0
     avg_loss = losers["pnl"].mean() if not losers.empty else 0
     payoff_ratio = abs(avg_win / avg_loss) if avg_loss else 0
+    expectancy = close_trades["pnl"].mean() if not close_trades.empty else 0
+    gross_profit = winners["pnl"].sum() if not winners.empty else 0
+    gross_loss = abs(losers["pnl"].sum()) if not losers.empty else 0
+    profit_factor = gross_profit / gross_loss if gross_loss else (float("inf") if gross_profit > 0 else 0)
 
     if not equity_curve.empty:
         peak = equity_curve["equity"].cummax()
@@ -343,25 +544,372 @@ def summarize_backtest(trades, equity_curve):
         else:
             current_streak = 0
 
-    close_trades = close_trades.reset_index(drop=True)
-    entries = trades[trades["pnl"] == 0].reset_index(drop=True)
-    holding_bars = 0
-    if not entries.empty and len(entries) == len(close_trades):
-        holding_bars = 1
+    holding_bars_list = []
+    open_entry_bar = None
+    for _, trade in trades.iterrows():
+        action = trade.get("action", "")
+        trade_bar = trade.get("bar", None)
+        if action in {"BUY_LONG", "SELL_SHORT"} and pd.notna(trade_bar):
+            open_entry_bar = trade_bar
+        elif (
+            action in {"CLOSE_LONG", "CLOSE_SHORT"}
+            and open_entry_bar is not None
+            and pd.notna(open_entry_bar)
+            and pd.notna(trade_bar)
+        ):
+            holding_bars_list.append(max(0, int(trade_bar) - int(open_entry_bar)))
+            open_entry_bar = None
+    holding_bars = round(float(pd.Series(holding_bars_list).mean()), 2) if holding_bars_list else 0
 
     long_pnl = close_trades[close_trades["action"].eq("CLOSE_LONG")]["pnl"].sum()
     short_pnl = close_trades[close_trades["action"].eq("CLOSE_SHORT")]["pnl"].sum()
+    long_trades = close_trades[close_trades["action"].eq("CLOSE_LONG")]
+    short_trades = close_trades[close_trades["action"].eq("CLOSE_SHORT")]
+    long_win_rate = (long_trades["pnl"] > 0).mean() * 100 if not long_trades.empty else 0
+    short_win_rate = (short_trades["pnl"] > 0).mean() * 100 if not short_trades.empty else 0
+
+    notes = close_trades["note"].fillna("").astype(str)
+    stop_mask = notes.str.contains("停損", regex=False)
+    take_mask = notes.str.contains("停利|獲利目標", regex=True)
+    strategy_exit_mask = ~(stop_mask | take_mask)
+    stop_count = int(stop_mask.sum())
+    take_count = int(take_mask.sum())
+    strategy_exit_count = int(strategy_exit_mask.sum())
+    stop_pnl = close_trades.loc[stop_mask, "pnl"].sum()
+    take_pnl = close_trades.loc[take_mask, "pnl"].sum()
+    strategy_exit_pnl = close_trades.loc[strategy_exit_mask, "pnl"].sum()
+
+    diagnostics = []
+    win_count = int((close_trades["pnl"] > 0).sum())
+    trade_count = int(len(close_trades))
+    win_rate = float((close_trades["pnl"] > 0).mean() * 100)
+    win_rate_lower = _wilson_lower_bound(win_count, trade_count)
+    if win_rate < 50 and payoff_ratio >= 1.5 and expectancy > 0:
+        diagnostics.append("勝率偏低但期望值為正，屬於低勝率高盈虧比；不要只用勝率否定策略。")
+    elif win_rate < 50 and expectancy <= 0:
+        diagnostics.append("勝率與期望值都偏弱，應優先提高進場品質或降低震盪盤交易。")
+    if not long_trades.empty and long_win_rate < 45:
+        diagnostics.append("多單勝率偏低，可提高多單門檻或要求 60 分趨勢偏多。")
+    if not short_trades.empty and short_win_rate < 45:
+        diagnostics.append("空單勝率偏低，可提高空單品質門檻或暫停做空。")
+    if stop_count > take_count * 1.5 and stop_count >= 3:
+        diagnostics.append("停損次數明顯多於停利，可能停損太窄、追價太遠或盤整過濾不足。")
+    if strategy_exit_count > take_count and strategy_exit_pnl < 0:
+        diagnostics.append("策略平倉貢獻為負，評分反轉出場可能太敏感。")
+    if profit_factor < 1.2:
+        diagnostics.append("Profit Factor 低於 1.2，尚未達到可用策略門檻。")
+    if win_rate >= 60 and win_rate_lower < 45:
+        diagnostics.append("勝率表面達標，但交易樣本不足或不穩，90%可信下限仍偏低。")
+    if not diagnostics:
+        diagnostics.append("目前主要指標沒有明顯單點問題，請用樣本外驗證確認穩定性。")
 
     return {
         "交易次數": int(len(close_trades)),
         "總損益": round(float(total_pnl), 0),
-        "勝率": round(float((close_trades["pnl"] > 0).mean() * 100), 2),
+        "勝率": round(float(win_rate), 2),
+        "勝率可信下限90": round(float(win_rate_lower), 2),
+        "期望值": round(float(expectancy), 0),
         "平均獲利": round(float(avg_win), 0),
         "平均虧損": round(float(avg_loss), 0),
         "盈虧比": round(float(payoff_ratio), 2),
+        "Profit Factor": round(float(profit_factor), 2),
         "最大回撤": round(float(max_drawdown), 0),
         "最大連虧次數": int(max_losing_streak),
         "平均持倉K棒數": holding_bars,
         "多單損益": round(float(long_pnl), 0),
         "空單損益": round(float(short_pnl), 0),
+        "多單勝率": round(float(long_win_rate), 2),
+        "空單勝率": round(float(short_win_rate), 2),
+        "多單交易次數": int(len(long_trades)),
+        "空單交易次數": int(len(short_trades)),
+        "停損次數": stop_count,
+        "停利次數": take_count,
+        "策略平倉次數": strategy_exit_count,
+        "停損損益": round(float(stop_pnl), 0),
+        "停利損益": round(float(take_pnl), 0),
+        "策略平倉損益": round(float(strategy_exit_pnl), 0),
+        "診斷": diagnostics,
     }
+
+
+def optimize_backtest_parameters(df, base_kwargs=None, min_trades=5, top_n=10):
+    base_kwargs = dict(base_kwargs or {})
+    results = []
+
+    profiles = [
+        ("高勝率保守", 65, 35, 1.0, 1.0, 1.15, 20, 1.0, 2, 2, True, True, 0.6, 5, 12, True, 0),
+        ("高勝率標準", 60, 40, 1.0, 1.1, 1.25, 18, 1.2, 2, 1, True, True, 0.7, 0, 16, True, 0),
+        ("平衡標準", 60, 40, 1.2, 1.2, 1.5, 20, 1.4, 2, 1, True, True, 0.8, 0, 24, True, 0),
+        ("趨勢型", 65, 35, 1.5, 1.3, 2.0, 22, 1.4, 2, 1, True, True, 1.0, 0, 0, False, 0),
+        ("只做多高勝率", 65, 35, 1.0, 1.0, 1.15, 20, 1.0, 2, 2, True, False, 0.6, 5, 12, True, 0),
+        ("只做空高勝率", 65, 35, 1.0, 1.0, 1.15, 20, 1.0, 2, 2, False, True, 0.6, 5, 12, True, 0),
+    ]
+
+    for (
+        profile_name,
+        long_score,
+        short_score,
+        min_rr,
+        atr_stop,
+        take_rr,
+        min_adx,
+        max_chase,
+        confirmation,
+        cooldown,
+        allow_long,
+        allow_short,
+        breakeven_trigger,
+        breakeven_buffer,
+        max_holding,
+        score_exit_profit_only,
+        score_exit_min_profit,
+    ) in profiles:
+        kwargs = {
+            **base_kwargs,
+            "long_entry_score": long_score,
+            "short_entry_score": short_score,
+            "min_entry_rr": min_rr,
+            "atr_stop_multiplier": atr_stop,
+            "reward_risk_ratio": take_rr,
+            "min_adx": min_adx,
+            "max_chase_atr": max_chase,
+            "confirmation_bars": confirmation,
+            "cooldown_bars": cooldown,
+            "allow_long": allow_long,
+            "allow_short": allow_short,
+            "breakeven_trigger_r": breakeven_trigger,
+            "breakeven_buffer_points": breakeven_buffer,
+            "max_holding_bars": max_holding,
+            "score_exit_requires_profit": score_exit_profit_only,
+            "min_score_exit_profit_points": score_exit_min_profit,
+            "reject_choppy": True,
+            "require_60m_alignment": True,
+        }
+        _, _, summary = run_backtest(df, **kwargs)
+        if summary.get("error"):
+            continue
+        if int(summary.get("交易次數", 0)) < int(min_trades):
+            continue
+
+        win_rate = float(summary.get("勝率", 0) or 0)
+        win_rate_lower = float(summary.get("勝率可信下限90", 0) or 0)
+        expectancy = float(summary.get("期望值", 0) or 0)
+        profit_factor = float(summary.get("Profit Factor", 0) or 0)
+        target_hit = win_rate >= 60 and expectancy > 0 and profit_factor >= 1.2
+        robust_hit = target_hit and win_rate_lower >= 45
+        viable = expectancy > 0 and profit_factor >= 1.0
+        quality_score = (
+            min(win_rate, 70) * 1.0
+            + min(max(expectancy, 0), 1000) / 20
+            + min(profit_factor, 3) * 10
+        )
+        results.append(
+            {
+                "設定類型": profile_name,
+                "多單門檻": long_score,
+                "空單門檻": short_score,
+                "最低RR": min_rr,
+                "ATR停損倍數": atr_stop,
+                "停利倍數": take_rr,
+                "最低ADX": min_adx,
+                "最大追價ATR": max_chase,
+                "確認K": confirmation,
+                "冷卻K": cooldown,
+                "允許多單": bool(allow_long),
+                "允許空單": bool(allow_short),
+                "保本觸發R": breakeven_trigger,
+                "保本加點": breakeven_buffer,
+                "最長持倉K": max_holding,
+                "評分出場需浮盈": bool(score_exit_profit_only),
+                "評分出場最低浮盈": score_exit_min_profit,
+                "正期望": bool(viable),
+                "達標": bool(target_hit),
+                "可信達標": bool(robust_hit),
+                "品質分數": round(float(quality_score), 2),
+                **summary,
+            }
+        )
+
+    if not results:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(results)
+    return out.sort_values(
+        ["可信達標", "達標", "正期望", "品質分數", "期望值", "總損益", "勝率"],
+        ascending=[False, False, False, False, False, False, False],
+    ).head(top_n).reset_index(drop=True)
+
+
+def optimize_then_validate(df, base_kwargs=None, train_ratio=0.7, min_trades=5, top_n=5):
+    base_kwargs = dict(base_kwargs or {})
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    try:
+        prepared = _resample_kbars(_normalise_kbars(df), base_kwargs.get("signal_timeframe", "15min"))
+    except Exception:
+        return pd.DataFrame()
+
+    split_at = int(len(prepared) * float(train_ratio))
+    if split_at < 80 or len(prepared) - split_at < 80:
+        return pd.DataFrame()
+
+    train_df = prepared.iloc[:split_at].copy()
+    test_df = prepared.iloc[split_at:].copy()
+    train_top = optimize_backtest_parameters(
+        train_df,
+        base_kwargs=base_kwargs,
+        min_trades=min_trades,
+        top_n=top_n,
+    )
+    if train_top.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, row in train_top.iterrows():
+        params = {
+            "long_entry_score": int(row["多單門檻"]),
+            "short_entry_score": int(row["空單門檻"]),
+            "min_entry_rr": float(row["最低RR"]),
+            "atr_stop_multiplier": float(row.get("ATR停損倍數", base_kwargs.get("atr_stop_multiplier", 1.2))),
+            "reward_risk_ratio": float(row.get("停利倍數", base_kwargs.get("reward_risk_ratio", 2.0))),
+            "min_adx": float(row["最低ADX"]),
+            "max_chase_atr": float(row["最大追價ATR"]),
+            "confirmation_bars": int(row.get("確認K", base_kwargs.get("confirmation_bars", 2))),
+            "cooldown_bars": int(row.get("冷卻K", base_kwargs.get("cooldown_bars", 1))),
+            "allow_long": bool(row.get("允許多單", base_kwargs.get("allow_long", True))),
+            "allow_short": bool(row.get("允許空單", base_kwargs.get("allow_short", True))),
+            "breakeven_trigger_r": float(row.get("保本觸發R", base_kwargs.get("breakeven_trigger_r", 0.7))),
+            "breakeven_buffer_points": float(row.get("保本加點", base_kwargs.get("breakeven_buffer_points", 0))),
+            "max_holding_bars": int(row.get("最長持倉K", base_kwargs.get("max_holding_bars", 0))),
+            "score_exit_requires_profit": bool(row.get("評分出場需浮盈", base_kwargs.get("score_exit_requires_profit", True))),
+            "min_score_exit_profit_points": float(row.get("評分出場最低浮盈", base_kwargs.get("min_score_exit_profit_points", 0))),
+            "reject_choppy": True,
+            "require_60m_alignment": True,
+        }
+        test_kwargs = {**base_kwargs, **params}
+        _, _, test_summary = run_backtest(test_df, **test_kwargs)
+        if test_summary.get("error"):
+            continue
+        rows.append(
+            {
+                **params,
+                "設定類型": row.get("設定類型", ""),
+                "訓練勝率": row.get("勝率", 0),
+                "訓練期望值": row.get("期望值", 0),
+                "訓練總損益": row.get("總損益", 0),
+                "訓練交易次數": row.get("交易次數", 0),
+                "樣本外勝率": test_summary.get("勝率", 0),
+                "樣本外勝率可信下限90": test_summary.get("勝率可信下限90", 0),
+                "樣本外期望值": test_summary.get("期望值", 0),
+                "樣本外總損益": test_summary.get("總損益", 0),
+                "樣本外交易次數": test_summary.get("交易次數", 0),
+                "樣本外PF": test_summary.get("Profit Factor", 0),
+                "樣本外最大回撤": test_summary.get("最大回撤", 0),
+                "樣本外達標": bool(
+                    float(test_summary.get("勝率", 0) or 0) >= 60
+                    and float(test_summary.get("期望值", 0) or 0) > 0
+                    and float(test_summary.get("Profit Factor", 0) or 0) >= 1.2
+                ),
+                "樣本外可信達標": bool(
+                    float(test_summary.get("勝率", 0) or 0) >= 60
+                    and float(test_summary.get("勝率可信下限90", 0) or 0) >= 45
+                    and float(test_summary.get("期望值", 0) or 0) > 0
+                    and float(test_summary.get("Profit Factor", 0) or 0) >= 1.2
+                ),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows).sort_values(
+        ["樣本外可信達標", "樣本外達標", "樣本外期望值", "樣本外總損益", "樣本外勝率"],
+        ascending=[False, False, False, False, False],
+    ).reset_index(drop=True)
+
+
+def walk_forward_validate(df, base_kwargs=None, folds=3, min_trades=3):
+    base_kwargs = dict(base_kwargs or {})
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    try:
+        prepared = _resample_kbars(_normalise_kbars(df), base_kwargs.get("signal_timeframe", "15min"))
+    except Exception:
+        return pd.DataFrame()
+
+    folds = max(1, int(folds or 1))
+    total_len = len(prepared)
+    min_train = 80
+    test_size = max(60, total_len // (folds + 2))
+    rows = []
+
+    for fold in range(folds):
+        train_end = min_train + fold * test_size
+        test_end = train_end + test_size
+        if train_end < min_train or test_end > total_len:
+            continue
+
+        train_df = prepared.iloc[:train_end].copy()
+        test_df = prepared.iloc[train_end:test_end].copy()
+        train_top = optimize_backtest_parameters(
+            train_df,
+            base_kwargs=base_kwargs,
+            min_trades=max(1, min_trades),
+            top_n=1,
+        )
+        if train_top.empty:
+            rows.append({"fold": fold + 1, "狀態": "訓練段無候選"})
+            continue
+
+        row = train_top.iloc[0]
+        params = {
+            "long_entry_score": int(row["多單門檻"]),
+            "short_entry_score": int(row["空單門檻"]),
+            "min_entry_rr": float(row["最低RR"]),
+            "atr_stop_multiplier": float(row.get("ATR停損倍數", base_kwargs.get("atr_stop_multiplier", 1.2))),
+            "reward_risk_ratio": float(row.get("停利倍數", base_kwargs.get("reward_risk_ratio", 2.0))),
+            "min_adx": float(row["最低ADX"]),
+            "max_chase_atr": float(row["最大追價ATR"]),
+            "confirmation_bars": int(row.get("確認K", base_kwargs.get("confirmation_bars", 2))),
+            "cooldown_bars": int(row.get("冷卻K", base_kwargs.get("cooldown_bars", 1))),
+            "allow_long": bool(row.get("允許多單", base_kwargs.get("allow_long", True))),
+            "allow_short": bool(row.get("允許空單", base_kwargs.get("allow_short", True))),
+            "breakeven_trigger_r": float(row.get("保本觸發R", base_kwargs.get("breakeven_trigger_r", 0.7))),
+            "breakeven_buffer_points": float(row.get("保本加點", base_kwargs.get("breakeven_buffer_points", 0))),
+            "max_holding_bars": int(row.get("最長持倉K", base_kwargs.get("max_holding_bars", 0))),
+            "score_exit_requires_profit": bool(row.get("評分出場需浮盈", base_kwargs.get("score_exit_requires_profit", True))),
+            "min_score_exit_profit_points": float(row.get("評分出場最低浮盈", base_kwargs.get("min_score_exit_profit_points", 0))),
+            "reject_choppy": True,
+            "require_60m_alignment": True,
+        }
+        _, _, test_summary = run_backtest(test_df, **{**base_kwargs, **params})
+        if test_summary.get("error"):
+            rows.append({"fold": fold + 1, "狀態": test_summary["error"]})
+            continue
+
+        rows.append(
+            {
+                "fold": fold + 1,
+                "狀態": "ok",
+                "設定類型": row.get("設定類型", ""),
+                "訓練勝率": row.get("勝率", 0),
+                "訓練期望值": row.get("期望值", 0),
+                "樣本外勝率": test_summary.get("勝率", 0),
+                "樣本外勝率可信下限90": test_summary.get("勝率可信下限90", 0),
+                "樣本外期望值": test_summary.get("期望值", 0),
+                "樣本外PF": test_summary.get("Profit Factor", 0),
+                "樣本外交易次數": test_summary.get("交易次數", 0),
+                "樣本外可信達標": bool(
+                    float(test_summary.get("勝率", 0) or 0) >= 60
+                    and float(test_summary.get("勝率可信下限90", 0) or 0) >= 45
+                    and float(test_summary.get("期望值", 0) or 0) > 0
+                    and float(test_summary.get("Profit Factor", 0) or 0) >= 1.2
+                ),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)

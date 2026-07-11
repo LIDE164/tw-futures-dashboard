@@ -7,6 +7,8 @@ class StrategyManager:
         short_exit_score=45,
         stop_loss_points=50,
         take_profit_points=100,
+        score_exit_requires_profit=False,
+        min_score_exit_profit_points=0,
     ):
         self.position = 0
         self.entry_price = 0.0
@@ -19,6 +21,8 @@ class StrategyManager:
             short_exit_score,
             stop_loss_points,
             take_profit_points,
+            score_exit_requires_profit,
+            min_score_exit_profit_points,
         )
 
     def update_config(
@@ -29,6 +33,8 @@ class StrategyManager:
         short_exit_score=45,
         stop_loss_points=50,
         take_profit_points=100,
+        score_exit_requires_profit=False,
+        min_score_exit_profit_points=0,
     ):
         self.long_entry_score = int(long_entry_score)
         self.short_entry_score = int(short_entry_score)
@@ -36,6 +42,8 @@ class StrategyManager:
         self.short_exit_score = int(short_exit_score)
         self.stop_loss_points = float(stop_loss_points)
         self.take_profit_points = float(take_profit_points)
+        self.score_exit_requires_profit = bool(score_exit_requires_profit)
+        self.min_score_exit_profit_points = float(min_score_exit_profit_points or 0)
 
     def sync_position(self, position=0, entry_price=0.0, stop_loss_price=0.0, take_profit_price=0.0):
         self.position = int(position)
@@ -77,6 +85,11 @@ class StrategyManager:
                 return "CLOSE_LONG", f"多單達停損價 {stop_price:,.0f}，產生平倉訊號。"
 
             if current_score < self.long_exit_score:
+                if self.score_exit_requires_profit and profit_points < self.min_score_exit_profit_points:
+                    return (
+                        "HOLD",
+                        f"評分降至 {current_score} 分，但多單尚未達浮盈門檻，先依停損/停利觀察。",
+                    )
                 return "CLOSE_LONG", f"評分降至 {current_score} 分，多單產生策略平倉訊號。"
 
             return "HOLD", f"多單續抱觀察，波段點數 {profit_points:+.0f}，進場點 {self.entry_price:,.0f}。"
@@ -93,6 +106,11 @@ class StrategyManager:
                 return "CLOSE_SHORT", f"空單達停損價 {stop_price:,.0f}，產生回補訊號。"
 
             if current_score > self.short_exit_score:
+                if self.score_exit_requires_profit and profit_points < self.min_score_exit_profit_points:
+                    return (
+                        "HOLD",
+                        f"評分回升至 {current_score} 分，但空單尚未達浮盈門檻，先依停損/停利觀察。",
+                    )
                 return "CLOSE_SHORT", f"評分回升至 {current_score} 分，空單產生策略平倉訊號。"
 
             return "HOLD", f"空單續抱觀察，波段點數 {profit_points:+.0f}，進場點 {self.entry_price:,.0f}。"
