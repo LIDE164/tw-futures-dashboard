@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 
@@ -29,14 +30,57 @@ except Exception:  # pragma: no cover
     sj = None
 
 
-if load_dotenv:
-    load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def _load_env_file(dotenv_path):
+    try:
+        text = Path(dotenv_path).read_text(encoding="utf-8-sig")
+    except OSError:
+        return False
+
+    loaded = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip().lstrip("\ufeff")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+
+        if key:
+            os.environ[key] = value
+            loaded = True
+    return loaded
+
+
+def load_environment():
+    dotenv_paths = [BASE_DIR / ".env", Path.cwd() / ".env"]
+    loaded = False
+    for dotenv_path in dotenv_paths:
+        if dotenv_path.exists():
+            if load_dotenv is not None:
+                load_dotenv(dotenv_path=dotenv_path, override=True, encoding="utf-8-sig")
+            _load_env_file(dotenv_path)
+            loaded = True
+    if not loaded and load_dotenv is not None:
+        load_dotenv(override=True, encoding="utf-8-sig")
+
+
+load_environment()
 
 
 def _get_secret(name, default=""):
     value = os.getenv(name)
     if value:
         return value
+
+    bom_value = os.getenv(f"\ufeff{name}")
+    if bom_value:
+        return bom_value
 
     try:
         return st.secrets.get(name, default)
