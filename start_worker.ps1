@@ -12,6 +12,10 @@ param(
     [double]$MinVolumeRatio = 1.0,
     [double]$MaxChaseAtr = 1.0,
     [int]$ConfirmationBars = 2,
+    [int]$CooldownBars = 2,
+    [double]$BreakevenTriggerR = 1.0,
+    [double]$BreakevenBufferPoints = 0,
+    [int]$MaxHoldingBars = 24,
     [switch]$NoLong,
     [switch]$AllowShort,
     [switch]$NoShort,
@@ -71,6 +75,10 @@ $ArgsList = @(
     "--min-volume-ratio", "$MinVolumeRatio",
     "--max-chase-atr", "$MaxChaseAtr",
     "--confirmation-bars", "$ConfirmationBars",
+    "--cooldown-bars", "$CooldownBars",
+    "--breakeven-trigger-r", "$BreakevenTriggerR",
+    "--breakeven-buffer-points", "$BreakevenBufferPoints",
+    "--max-holding-bars", "$MaxHoldingBars",
     "--min-score-exit-profit-points", "$MinScoreExitProfitPoints"
 )
 if ($NoAutoPaperFill) {

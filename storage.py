@@ -96,6 +96,14 @@ def save_json_state(key, value):
         )
 
 
+def load_worker_trade_state():
+    return load_json_state("signal_worker_trade", {})
+
+
+def save_worker_trade_state(state):
+    save_json_state("signal_worker_trade", dict(state or {}))
+
+
 def load_paper_broker_state():
     return load_json_state("paper_broker", {})
 

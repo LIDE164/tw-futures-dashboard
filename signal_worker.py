@@ -12,7 +12,14 @@ from market_session import TAIPEI, get_market_status
 from paper_broker import PaperBroker
 from risk_manager import evaluate_entry_risk
 from scoring import get_decision_score
-from storage import restore_paper_broker_state, save_paper_broker_state, save_signal, update_heartbeat
+from storage import (
+    load_worker_trade_state,
+    restore_paper_broker_state,
+    save_paper_broker_state,
+    save_signal,
+    save_worker_trade_state,
+    update_heartbeat,
+)
 from strategy import StrategyManager
 
 
@@ -155,6 +162,106 @@ def _effective_risk_points(args, tech_data):
     return stop_points, take_points
 
 
+def _bar_timestamp(value):
+    timestamp = pd.to_datetime(value, errors="coerce")
+    return None if pd.isna(timestamp) else timestamp
+
+
+def _bars_since(bars, bar_time):
+    start = _bar_timestamp(bar_time)
+    if start is None or bars is None or bars.empty:
+        return 0
+    timestamps = pd.to_datetime(bars["ts"], errors="coerce")
+    return int((timestamps > start).sum())
+
+
+def _reconcile_worker_trade_state(broker, bars):
+    state = load_worker_trade_state()
+    latest_bar = _bar_timestamp(bars["ts"].iloc[-1])
+    latest_bar_text = latest_bar.isoformat() if latest_bar is not None else ""
+    saved_position = int(state.get("position") or 0)
+
+    if broker.position == 0:
+        if saved_position != 0:
+            state["last_exit_bar_time"] = latest_bar_text
+        state.update(
+            {
+                "position": 0,
+                "entry_bar_time": "",
+                "original_stop_price": 0.0,
+                "breakeven_applied": False,
+            }
+        )
+    elif saved_position != broker.position or not state.get("entry_bar_time"):
+        state.update(
+            {
+                "position": broker.position,
+                "entry_bar_time": latest_bar_text,
+                "original_stop_price": float(broker.stop_loss_price or 0),
+                "breakeven_applied": False,
+            }
+        )
+
+    save_worker_trade_state(state)
+    return state
+
+
+def _apply_breakeven_stop(broker, state, current_price, trigger_r, buffer_points):
+    if broker.position == 0 or not trigger_r or state.get("breakeven_applied"):
+        return False
+
+    entry_price = float(broker.entry_price or 0)
+    original_stop = float(state.get("original_stop_price") or broker.stop_loss_price or 0)
+    current_price = float(current_price or 0)
+    buffer_points = float(buffer_points or 0)
+    risk_points = abs(entry_price - original_stop)
+    if entry_price <= 0 or original_stop <= 0 or current_price <= 0 or risk_points <= 0:
+        return False
+
+    if broker.position > 0:
+        triggered = current_price >= entry_price + risk_points * float(trigger_r)
+        new_stop = entry_price + buffer_points
+        improves_stop = not broker.stop_loss_price or broker.stop_loss_price < new_stop
+    else:
+        triggered = current_price <= entry_price - risk_points * float(trigger_r)
+        new_stop = entry_price - buffer_points
+        improves_stop = not broker.stop_loss_price or broker.stop_loss_price > new_stop
+
+    if not triggered or not improves_stop:
+        return False
+
+    broker.stop_loss_price = float(new_stop)
+    state["breakeven_applied"] = True
+    save_paper_broker_state(broker)
+    save_worker_trade_state(state)
+    return True
+
+
+def _record_worker_fill_state(state, broker, action, bar_time, stop_price=0):
+    timestamp = _bar_timestamp(bar_time)
+    bar_text = timestamp.isoformat() if timestamp is not None else str(bar_time or "")
+    if action in {"BUY_LONG", "SELL_SHORT"}:
+        state.update(
+            {
+                "position": broker.position,
+                "entry_bar_time": bar_text,
+                "original_stop_price": float(stop_price or broker.stop_loss_price or 0),
+                "breakeven_applied": False,
+            }
+        )
+    elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
+        state.update(
+            {
+                "position": 0,
+                "entry_bar_time": "",
+                "original_stop_price": 0.0,
+                "breakeven_applied": False,
+                "last_exit_bar_time": bar_text,
+            }
+        )
+    save_worker_trade_state(state)
+
+
 def _heartbeat_detail(market_status, realtime, bars, score=None, label="", action="", message=""):
     current_price = float(realtime.get("current_price") or 0)
     bar_time = "no_completed_bar"
@@ -287,6 +394,7 @@ def evaluate_once(api, args):
     )
     broker.commission_per_side = args.commission_per_side
     broker.slippage_points = args.slippage_points
+    worker_state = _reconcile_worker_trade_state(broker, bars)
     tech_data = build_tech_data(bars, realtime)
     effective_stop_loss_points, effective_take_profit_points = _effective_risk_points(args, tech_data)
     strategy = StrategyManager(
@@ -306,7 +414,38 @@ def evaluate_once(api, args):
 
     score, label, reasons, feature = get_decision_score(tech_data, inst_data={}, with_reason=True)
     current_price = float(realtime.get("current_price") or 0)
+    breakeven_applied = _apply_breakeven_stop(
+        broker,
+        worker_state,
+        current_price,
+        args.breakeven_trigger_r,
+        args.breakeven_buffer_points,
+    )
+    if breakeven_applied:
+        strategy.sync_position(
+            broker.position,
+            broker.entry_price,
+            broker.stop_loss_price,
+            broker.take_profit_price,
+        )
     action, message = strategy.decide_action(score, current_price)
+    holding_bars = _bars_since(bars, worker_state.get("entry_bar_time"))
+    if (
+        broker.position > 0
+        and args.max_holding_bars
+        and holding_bars >= int(args.max_holding_bars)
+        and current_price > broker.entry_price
+    ):
+        action = "CLOSE_LONG"
+        message = f"持倉已達 {holding_bars} 根 15 分 K 且仍有獲利，執行逾時平倉。"
+    elif (
+        broker.position < 0
+        and args.max_holding_bars
+        and holding_bars >= int(args.max_holding_bars)
+        and current_price < broker.entry_price
+    ):
+        action = "CLOSE_SHORT"
+        message = f"持倉已達 {holding_bars} 根 15 分 K 且仍有獲利，執行逾時平倉。"
     event_type = _event_type(action, message, broker, current_price)
     if action == "BUY_LONG" and not args.allow_long:
         _update_worker_heartbeat("ok", _heartbeat_detail(market_status, realtime, bars, score, label, action, "entry blocked: long side disabled"))
@@ -316,6 +455,21 @@ def evaluate_once(api, args):
         return None
 
     if action in {"BUY_LONG", "SELL_SHORT"}:
+        cooldown_elapsed = _bars_since(bars, worker_state.get("last_exit_bar_time"))
+        if worker_state.get("last_exit_bar_time") and cooldown_elapsed <= int(args.cooldown_bars):
+            _update_worker_heartbeat(
+                "ok",
+                _heartbeat_detail(
+                    market_status,
+                    realtime,
+                    bars,
+                    score,
+                    label,
+                    action,
+                    f"entry blocked: cooling down {cooldown_elapsed}/{int(args.cooldown_bars)} completed bars",
+                ),
+            )
+            return None
         if int(args.confirmation_bars) >= 2 and len(bars) >= 2:
             prev_history = bars.iloc[:-1].copy()
             prev_close = float(prev_history["Close"].iloc[-1])
@@ -435,6 +589,7 @@ def evaluate_once(api, args):
         )
         tracking_detail = f" | paper: {tracking_detail}" if tracking_detail else ""
         if tracked:
+            _record_worker_fill_state(worker_state, broker, action, bar_time, stop_price)
             strategy.apply_fill(
                 action,
                 entry_price,
@@ -496,6 +651,10 @@ def parse_args():
     parser.add_argument("--min-volume-ratio", type=float, default=1.0)
     parser.add_argument("--max-chase-atr", type=float, default=1.0)
     parser.add_argument("--confirmation-bars", type=int, default=2)
+    parser.add_argument("--cooldown-bars", type=int, default=2)
+    parser.add_argument("--breakeven-trigger-r", type=float, default=1.0)
+    parser.add_argument("--breakeven-buffer-points", type=float, default=0)
+    parser.add_argument("--max-holding-bars", type=int, default=24)
     parser.add_argument("--allow-long", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--allow-short", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--score-exit-requires-profit", action=argparse.BooleanOptionalAction, default=True)
