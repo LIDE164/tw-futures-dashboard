@@ -135,6 +135,40 @@ def dispatch_alert(signal, event_type="SIGNAL"):
     return True, detail
 
 
+def dispatch_research_report(report, body):
+    report_date = str(report.get("report_date") or datetime.now().date().isoformat())
+    alert_key = f"DAILY_RESEARCH:{report_date}"
+    title = "微型臺指收盤研究報告"
+    inserted = save_alert(
+        {
+            "alert_key": alert_key,
+            "event_type": "DAILY_RESEARCH",
+            "title": title,
+            "body": body,
+            "status": "created",
+            "detail": "dedupe accepted",
+        }
+    )
+    if not inserted:
+        return False, "duplicate alert skipped"
+
+    sent, detail = _send_telegram(body)
+    if not sent:
+        sent, detail = _send_webhook(title, body)
+    save_alert(
+        {
+            "alert_key": f"{alert_key}:delivery",
+            "event_type": "DAILY_RESEARCH_DELIVERY",
+            "title": title,
+            "body": body,
+            "status": "sent" if sent else "stored",
+            "detail": detail,
+        }
+    )
+    print(body)
+    return True, detail
+
+
 def main():
     parser = argparse.ArgumentParser(description="Alert delivery utilities")
     parser.add_argument("--test", action="store_true", help="Send a Telegram test message")

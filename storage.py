@@ -66,6 +66,19 @@ def _connect(db_path=DB_PATH):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS research_reports (
+            report_date TEXT PRIMARY KEY,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            history_rows INTEGER DEFAULT 0,
+            backtest_trades INTEGER DEFAULT 0,
+            paper_trades INTEGER DEFAULT 0,
+            status TEXT,
+            payload TEXT NOT NULL
+        )
+        """
+    )
     return conn
 
 
@@ -252,3 +265,64 @@ def get_recent_signals(limit=20):
             (int(limit),),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def save_research_report(report):
+    report = dict(report or {})
+    report_date = str(report.get("report_date") or "")
+    if not report_date:
+        raise ValueError("研究報告缺少 report_date。")
+    payload = json.dumps(report, ensure_ascii=False)
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO research_reports (
+                report_date, created_at, history_rows, backtest_trades,
+                paper_trades, status, payload
+            ) VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
+            ON CONFLICT(report_date) DO UPDATE SET
+                created_at = CURRENT_TIMESTAMP,
+                history_rows = excluded.history_rows,
+                backtest_trades = excluded.backtest_trades,
+                paper_trades = excluded.paper_trades,
+                status = excluded.status,
+                payload = excluded.payload
+            """,
+            (
+                report_date,
+                int(report.get("history_rows") or 0),
+                int(report.get("backtest", {}).get("交易次數") or 0),
+                int(report.get("paper_day", {}).get("trades") or 0),
+                str(report.get("status") or ""),
+                payload,
+            ),
+        )
+
+
+def get_recent_research_reports(limit=20):
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT report_date, created_at, history_rows, backtest_trades,
+                   paper_trades, status, payload
+            FROM research_reports
+            ORDER BY report_date DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["report"] = json.loads(item.pop("payload"))
+        except (json.JSONDecodeError, TypeError):
+            item["report"] = {}
+            item.pop("payload", None)
+        result.append(item)
+    return result
+
+
+def get_latest_research_report():
+    reports = get_recent_research_reports(1)
+    return reports[0] if reports else {}

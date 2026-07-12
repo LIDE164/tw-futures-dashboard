@@ -22,6 +22,11 @@ except Exception:
     storage = None
 
 try:
+    import historical_data
+except Exception:
+    historical_data = None
+
+try:
     import backtester
 except Exception as exc:
     backtester = None
@@ -299,6 +304,21 @@ def get_recent_signals_safe(limit=20):
 def get_recent_alerts_safe(limit=20):
     func = getattr(storage, "get_recent_alerts", None)
     return func(limit) if func else []
+
+
+def get_history_status_safe():
+    func = getattr(historical_data, "get_history_status", None)
+    return func(PRODUCT_ROOT) if func else {}
+
+
+def get_recent_rollovers_safe(limit=10):
+    func = getattr(historical_data, "get_recent_rollovers", None)
+    return func(PRODUCT_ROOT, limit) if func else []
+
+
+def get_latest_research_report_safe():
+    func = getattr(storage, "get_latest_research_report", None)
+    return func() if func else {}
 
 
 def get_realtime_data_safe(api, product_root=PRODUCT_ROOT):
@@ -1036,6 +1056,40 @@ elif page == "警報服務":
             st.info("雲端頁面沒有本機 worker 心跳是正常的，請不要用這個狀態判斷本機發報是否停止。")
         else:
             st.warning("尚未收到本機 signal_worker 心跳。請先啟動 `start_worker.cmd`，或用 `worker_status.cmd` 查看。")
+
+    st.subheader("歷史 K 線資料庫")
+    history_status = get_history_status_safe()
+    if history_status and history_status.get("rows"):
+        db1, db2, db3 = st.columns(3)
+        db1.metric("累積 K 線", f"{history_status.get('rows', 0):,}")
+        db2.metric("實際契約", history_status.get("active_contract") or "無資料")
+        db3.metric("換月次數", history_status.get("rollovers", 0))
+        st.caption(
+            f"資料範圍：{history_status.get('first_ts') or '無資料'} ～ "
+            f"{history_status.get('last_ts') or '無資料'}｜最後補資料："
+            f"{history_status.get('last_sync_at') or '無資料'}"
+        )
+        rollovers = get_recent_rollovers_safe(5)
+        if rollovers:
+            with st.expander("最近換月紀錄", expanded=False):
+                st.dataframe(pd.DataFrame(rollovers), use_container_width=True)
+    else:
+        st.info("歷史資料庫尚未建立；新版 worker 第一次成功讀取永豐 K 線後會自動建立。")
+
+    st.subheader("最新收盤研究報告")
+    latest_research = get_latest_research_report_safe()
+    if latest_research:
+        report = latest_research.get("report", {})
+        summary = report.get("backtest", {})
+        walk = report.get("walk_forward", {})
+        rp1, rp2, rp3 = st.columns(3)
+        rp1.metric("累積交易", summary.get("交易次數", 0))
+        rp2.metric("每筆期望值", format_money(summary.get("期望值", 0)))
+        rp3.metric("樣本外交易", walk.get("oos_trades", 0))
+        st.write(f"研究狀態：{report.get('status') or latest_research.get('status') or '無資料'}")
+        st.caption(report.get("learning", {}).get("reason", ""))
+    else:
+        st.info("尚無收盤研究報告；交易日 13:50 後由 worker 自動產生並發送 Telegram。")
 
     st.write("啟動指令")
     st.code(".\\run_worker.cmd -Interval 30", language="powershell")

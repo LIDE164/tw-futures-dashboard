@@ -1,22 +1,26 @@
 ﻿import argparse
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 import sinopac_api
-from alert_manager import dispatch_alert
+from alert_manager import dispatch_alert, dispatch_research_report
+from daily_research import format_close_research_report, run_close_research
+from historical_data import get_history_status, load_continuous_kbars, upsert_contract_kbars
 from indicators import build_tech_data
 from market_session import TAIPEI, get_market_status
 from paper_broker import PaperBroker
 from risk_manager import evaluate_entry_risk
 from scoring import get_decision_score
 from storage import (
+    load_json_state,
     load_worker_trade_state,
     restore_paper_broker_state,
     save_paper_broker_state,
     save_signal,
+    save_json_state,
     save_worker_trade_state,
     update_heartbeat,
 )
@@ -29,6 +33,7 @@ WORKER_NAME = "signal_worker"
 TEST_SIGNAL_ACTIONS = {"BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT"}
 TEST_EXIT_EVENTS = {"STOP", "TARGET"}
 HEARTBEAT_TEXT_PATH = Path("data/signal_worker_heartbeat.txt")
+HISTORY_MAINTENANCE_STATE_KEY = "history_maintenance"
 
 
 def _update_worker_heartbeat(status, detail=""):
@@ -262,6 +267,117 @@ def _record_worker_fill_state(state, broker, action, bar_time, stop_price=0):
     save_worker_trade_state(state)
 
 
+def _close_report_due(now, args):
+    if not args.daily_close_report or now.weekday() >= 5:
+        return False
+    current_minutes = now.hour * 60 + now.minute
+    report_minutes = int(args.daily_report_hour) * 60 + int(args.daily_report_minute)
+    return report_minutes <= current_minutes < 15 * 60
+
+
+def _research_base_kwargs(args):
+    return {
+        "quantity": int(args.paper_quantity),
+        "multiplier": 10,
+        "commission_per_side": float(args.commission_per_side),
+        "slippage_points": float(args.slippage_points),
+        "long_entry_score": int(args.long_entry_score),
+        "short_entry_score": int(args.short_entry_score),
+        "stop_loss_points": float(args.stop_loss_points),
+        "take_profit_points": float(args.take_profit_points),
+        "adaptive_risk": bool(args.adaptive_risk),
+        "atr_stop_multiplier": float(args.atr_stop_multiplier),
+        "reward_risk_ratio": float(args.reward_risk_ratio),
+        "min_entry_rr": float(args.min_entry_rr),
+        "reject_choppy": bool(args.reject_choppy),
+        "require_60m_alignment": bool(args.require_60m_alignment),
+        "min_adx": float(args.min_adx),
+        "min_volume_ratio": float(args.min_volume_ratio),
+        "max_chase_atr": float(args.max_chase_atr),
+        "confirmation_bars": int(args.confirmation_bars),
+        "cooldown_bars": int(args.cooldown_bars),
+        "allow_long": bool(args.allow_long),
+        "allow_short": bool(args.allow_short),
+        "breakeven_trigger_r": float(args.breakeven_trigger_r),
+        "breakeven_buffer_points": float(args.breakeven_buffer_points),
+        "max_holding_bars": int(args.max_holding_bars),
+        "score_exit_requires_profit": bool(args.score_exit_requires_profit),
+        "min_score_exit_profit_points": float(args.min_score_exit_profit_points),
+        "signal_timeframe": SIGNAL_TIMEFRAME,
+        "include_institutional": False,
+    }
+
+
+def _maintain_history_and_report(raw_kbars, args, now=None):
+    now = now or datetime.now(TAIPEI)
+    state = load_json_state(HISTORY_MAINTENANCE_STATE_KEY, {})
+    report_date = now.date().isoformat()
+    attrs = getattr(raw_kbars, "attrs", {})
+    contract_code = str(attrs.get("contract_code", "") or "")
+    delivery_date = str(attrs.get("delivery_date", "") or "")
+    source = str(attrs.get("source", "Sinopac Shioaji kbars"))
+    report_due = _close_report_due(now, args)
+    sync_due = (
+        bool(args.history_sync)
+        and raw_kbars is not None
+        and not raw_kbars.empty
+        and contract_code
+        and (
+            state.get("last_sync_date") != report_date
+            or state.get("contract_code") != contract_code
+            or (report_due and state.get("close_sync_date") != report_date)
+        )
+    )
+
+    sync_result = {}
+    if sync_due:
+        sync_result = upsert_contract_kbars(
+            raw_kbars,
+            contract_code=contract_code,
+            delivery_date=delivery_date,
+            product_root=PRODUCT_ROOT,
+            source=source,
+            synced_at=now.replace(tzinfo=None),
+        )
+        state.update(
+            {
+                "last_sync_date": report_date,
+                "last_sync_at": now.isoformat(timespec="seconds"),
+                "contract_code": contract_code,
+            }
+        )
+        if report_due:
+            state["close_sync_date"] = report_date
+        save_json_state(HISTORY_MAINTENANCE_STATE_KEY, state)
+
+    if not report_due or state.get("last_report_date") == report_date:
+        return {"sync": sync_result, "report": None, "delivery": ""}
+
+    history_status = get_history_status(PRODUCT_ROOT)
+    if not str(history_status.get("last_ts") or "").startswith(report_date):
+        return {"sync": sync_result, "report": None, "delivery": "no current trading-day bars"}
+
+    history_start = now.replace(tzinfo=None) - timedelta(days=max(90, int(args.research_history_days)))
+    history = load_continuous_kbars(PRODUCT_ROOT, start=history_start)
+    report = run_close_research(
+        history,
+        report_date=report_date,
+        history_status=history_status,
+        base_kwargs=_research_base_kwargs(args),
+        folds=args.research_folds,
+        min_reference_trades=args.min_reference_trades,
+        min_oos_trades=args.min_oos_trades,
+        run_optimisation=now.weekday() == 4,
+    )
+    report_body = format_close_research_report(report)
+    _, delivery = dispatch_research_report(report, report_body)
+    state["last_report_date"] = report_date
+    state["last_report_at"] = now.isoformat(timespec="seconds")
+    state["last_report_delivery"] = delivery
+    save_json_state(HISTORY_MAINTENANCE_STATE_KEY, state)
+    return {"sync": sync_result, "report": report, "delivery": delivery}
+
+
 def _heartbeat_detail(market_status, realtime, bars, score=None, label="", action="", message=""):
     current_price = float(realtime.get("current_price") or 0)
     bar_time = "no_completed_bar"
@@ -379,6 +495,18 @@ def evaluate_once(api, args):
     raw_kbars, kbars_error = sinopac_api.get_recent_micro_txf_kbars(api, days=args.days)
     if kbars_error:
         _update_worker_heartbeat("warning", kbars_error)
+
+    try:
+        maintenance = _maintain_history_and_report(raw_kbars, args)
+    except Exception as exc:
+        maintenance = {"sync": {}, "report": None, "delivery": ""}
+        _update_worker_heartbeat("warning", f"history/research maintenance failed: {exc}")
+    if maintenance.get("report"):
+        report = maintenance["report"]
+        print(
+            f"{report.get('report_date')} daily research: {report.get('status')} | "
+            f"delivery: {maintenance.get('delivery')}"
+        )
 
     bars = _resample_completed_bars(raw_kbars)
     if bars.empty:
@@ -655,6 +783,14 @@ def parse_args():
     parser.add_argument("--breakeven-trigger-r", type=float, default=1.0)
     parser.add_argument("--breakeven-buffer-points", type=float, default=0)
     parser.add_argument("--max-holding-bars", type=int, default=24)
+    parser.add_argument("--history-sync", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--daily-close-report", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--daily-report-hour", type=int, default=13)
+    parser.add_argument("--daily-report-minute", type=int, default=50)
+    parser.add_argument("--research-history-days", type=int, default=730)
+    parser.add_argument("--research-folds", type=int, default=3)
+    parser.add_argument("--min-reference-trades", type=int, default=100)
+    parser.add_argument("--min-oos-trades", type=int, default=30)
     parser.add_argument("--allow-long", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--allow-short", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--score-exit-requires-profit", action=argparse.BooleanOptionalAction, default=True)

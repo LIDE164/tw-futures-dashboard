@@ -190,7 +190,9 @@ def get_near_month_futures_contract(api, product_root=DEFAULT_FUTURES_ROOT):
     if api is None:
         raise RuntimeError("尚未登入永豐 API。")
 
-    today = datetime.now().strftime("%Y/%m/%d")
+    now = datetime.now()
+    today = now.strftime("%Y/%m/%d")
+    settlement_finished = (now.hour, now.minute) >= (13, 45)
     contracts = []
     for contract in _iter_contracts(_get_futures_group(api, product_root)):
         code = getattr(contract, "code", "")
@@ -198,7 +200,10 @@ def get_near_month_futures_contract(api, product_root=DEFAULT_FUTURES_ROOT):
 
         if not code.startswith(product_root) or code.startswith(f"{product_root}R"):
             continue
-        if delivery_date and delivery_date < today:
+        if delivery_date and (
+            delivery_date < today
+            or (delivery_date == today and settlement_finished)
+        ):
             continue
 
         contracts.append(contract)
