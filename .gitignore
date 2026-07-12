@@ -5,6 +5,7 @@ data/*.db
 data/*.db-*
 data/*.pid
 data/*heartbeat*.txt
+data/*.png
 logs/
 shioaji.log
 __pycache__/

@@ -7,6 +7,7 @@ import pandas as pd
 
 import sinopac_api
 from alert_manager import dispatch_alert, dispatch_preopen_briefing, dispatch_research_report
+from briefing_image import render_preopen_briefing_image
 from daily_research import format_close_research_report, run_close_research
 from historical_data import get_history_status, load_continuous_kbars, upsert_contract_kbars
 from indicators import build_tech_data
@@ -346,7 +347,12 @@ def _maybe_send_preopen_briefing(
         quality_reasons=quality_reasons,
     )
     body = format_preopen_briefing(briefing)
-    _, delivery = dispatch_preopen_briefing(briefing, body)
+    image_path = None
+    try:
+        image_path = render_preopen_briefing_image(briefing, bars)
+    except Exception as exc:
+        print(f"preopen image fallback to text: {exc}")
+    _, delivery = dispatch_preopen_briefing(briefing, body, image_path=image_path)
     state.update(
         {
             "last_session_key": session_key,

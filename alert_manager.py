@@ -57,6 +57,28 @@ def _send_telegram(body):
     return False, f"telegram failed: {resp.status_code} {resp.text[:200]}"
 
 
+def _send_telegram_photo(image_path, caption=""):
+    if requests is None:
+        return False, "requests 未安裝，略過 Telegram 圖片發送"
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        return False, "未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID"
+    if not image_path or not os.path.exists(image_path):
+        return False, "Telegram 圖片檔不存在"
+
+    with open(image_path, "rb") as image_file:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendPhoto",
+            data={"chat_id": chat_id, "caption": str(caption)[:1000]},
+            files={"photo": (os.path.basename(image_path), image_file, "image/png")},
+            timeout=20,
+        )
+    if resp.ok:
+        return True, "telegram photo sent"
+    return False, f"telegram photo failed: {resp.status_code} {resp.text[:200]}"
+
+
 def _send_webhook(title, body):
     if requests is None:
         return False, "requests 未安裝，略過 webhook 發送"
@@ -169,7 +191,7 @@ def dispatch_research_report(report, body):
     return True, detail
 
 
-def dispatch_preopen_briefing(briefing, body):
+def dispatch_preopen_briefing(briefing, body, image_path=None):
     session_key = str(briefing.get("session_key") or "")
     alert_key = f"PREOPEN:{session_key}"
     title = f"微型臺指{briefing.get('session_label', '')}開盤前簡報"
@@ -186,7 +208,17 @@ def dispatch_preopen_briefing(briefing, body):
     if not inserted:
         return False, "duplicate alert skipped"
 
-    sent, detail = _send_telegram(body)
+    if image_path:
+        caption = (
+            f"微型臺指{briefing.get('session_label', '')}開盤前交易地圖\n"
+            f"方向：{briefing.get('direction')}｜評分：{briefing.get('score')} {briefing.get('label')}\n"
+            "請看圖片中的關鍵價位與三種劇本；開盤後等待第一根完整 15 分 K 確認。"
+        )
+        sent, detail = _send_telegram_photo(image_path, caption)
+    else:
+        sent, detail = _send_telegram(body)
+    if not sent:
+        sent, detail = _send_telegram(body)
     if not sent:
         sent, detail = _send_webhook(title, body)
     save_alert(
