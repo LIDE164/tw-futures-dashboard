@@ -6,13 +6,15 @@ from pathlib import Path
 import pandas as pd
 
 import sinopac_api
-from alert_manager import dispatch_alert, dispatch_research_report
+from alert_manager import dispatch_alert, dispatch_preopen_briefing, dispatch_research_report
 from daily_research import format_close_research_report, run_close_research
 from historical_data import get_history_status, load_continuous_kbars, upsert_contract_kbars
 from indicators import build_tech_data
+from market_data import get_public_market_data
 from market_session import TAIPEI, get_market_status
 from paper_broker import PaperBroker
-from risk_manager import evaluate_entry_risk
+from preopen_briefing import build_preopen_briefing, format_preopen_briefing
+from risk_manager import evaluate_entry_risk, evaluate_signal_quality
 from scoring import get_decision_score
 from storage import (
     load_json_state,
@@ -34,6 +36,7 @@ TEST_SIGNAL_ACTIONS = {"BUY_LONG", "SELL_SHORT", "CLOSE_LONG", "CLOSE_SHORT"}
 TEST_EXIT_EVENTS = {"STOP", "TARGET"}
 HEARTBEAT_TEXT_PATH = Path("data/signal_worker_heartbeat.txt")
 HISTORY_MAINTENANCE_STATE_KEY = "history_maintenance"
+PREOPEN_BRIEFING_STATE_KEY = "preopen_briefing"
 
 
 def _update_worker_heartbeat(status, detail=""):
@@ -273,6 +276,86 @@ def _close_report_due(now, args):
     current_minutes = now.hour * 60 + now.minute
     report_minutes = int(args.daily_report_hour) * 60 + int(args.daily_report_minute)
     return report_minutes <= current_minutes < 15 * 60
+
+
+def _preopen_session(now, args):
+    if not args.preopen_briefing or now.weekday() >= 5:
+        return ""
+    current_minutes = now.hour * 60 + now.minute
+    day_send = int(args.day_preopen_hour) * 60 + int(args.day_preopen_minute)
+    night_send = int(args.night_preopen_hour) * 60 + int(args.night_preopen_minute)
+    if day_send <= current_minutes < 8 * 60 + 45:
+        return "day"
+    if night_send <= current_minutes < 15 * 60:
+        return "night"
+    return ""
+
+
+def _maybe_send_preopen_briefing(
+    now,
+    args,
+    realtime,
+    bars,
+    tech_data,
+    score,
+    label,
+    reasons,
+    action,
+    message,
+    broker,
+    stop_loss_points,
+    take_profit_points,
+):
+    session = _preopen_session(now, args)
+    if not session:
+        return None
+
+    session_key = f"{now.date().isoformat()}:{session}"
+    state = load_json_state(PREOPEN_BRIEFING_STATE_KEY, {})
+    if state.get("last_session_key") == session_key:
+        return None
+
+    quality_reasons = evaluate_signal_quality(
+        action,
+        tech_data,
+        reject_choppy=args.reject_choppy,
+        require_60m_alignment=args.require_60m_alignment,
+        min_adx=args.min_adx,
+        min_volume_ratio=args.min_volume_ratio,
+        max_chase_atr=args.max_chase_atr,
+    )
+    public_data = get_public_market_data()
+    briefing = build_preopen_briefing(
+        session=session,
+        session_key=session_key,
+        realtime=realtime,
+        bars=bars,
+        tech_data=tech_data,
+        score=score,
+        label=label,
+        reasons=reasons,
+        action=action,
+        message=message,
+        public_data=public_data,
+        broker=broker,
+        stop_loss_points=stop_loss_points,
+        take_profit_points=take_profit_points,
+        commission_per_side=args.commission_per_side,
+        allow_long=args.allow_long,
+        allow_short=args.allow_short,
+        quality_reasons=quality_reasons,
+    )
+    body = format_preopen_briefing(briefing)
+    _, delivery = dispatch_preopen_briefing(briefing, body)
+    state.update(
+        {
+            "last_session_key": session_key,
+            "last_sent_at": now.isoformat(timespec="seconds"),
+            "last_delivery": delivery,
+        }
+    )
+    save_json_state(PREOPEN_BRIEFING_STATE_KEY, state)
+    return {"briefing": briefing, "delivery": delivery}
 
 
 def _research_base_kwargs(args):
@@ -574,6 +657,26 @@ def evaluate_once(api, args):
     ):
         action = "CLOSE_SHORT"
         message = f"持倉已達 {holding_bars} 根 15 分 K 且仍有獲利，執行逾時平倉。"
+    preopen_result = _maybe_send_preopen_briefing(
+        datetime.now(TAIPEI),
+        args,
+        realtime,
+        bars,
+        tech_data,
+        score,
+        label,
+        reasons,
+        action,
+        message,
+        broker,
+        effective_stop_loss_points,
+        effective_take_profit_points,
+    )
+    if preopen_result:
+        print(
+            f"preopen briefing {preopen_result['briefing'].get('session_key')}: "
+            f"{preopen_result.get('delivery')}"
+        )
     event_type = _event_type(action, message, broker, current_price)
     if action == "BUY_LONG" and not args.allow_long:
         _update_worker_heartbeat("ok", _heartbeat_detail(market_status, realtime, bars, score, label, action, "entry blocked: long side disabled"))
@@ -791,13 +894,18 @@ def parse_args():
     parser.add_argument("--research-folds", type=int, default=3)
     parser.add_argument("--min-reference-trades", type=int, default=100)
     parser.add_argument("--min-oos-trades", type=int, default=30)
+    parser.add_argument("--preopen-briefing", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--day-preopen-hour", type=int, default=8)
+    parser.add_argument("--day-preopen-minute", type=int, default=35)
+    parser.add_argument("--night-preopen-hour", type=int, default=14)
+    parser.add_argument("--night-preopen-minute", type=int, default=50)
     parser.add_argument("--allow-long", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--allow-short", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--score-exit-requires-profit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--min-score-exit-profit-points", type=float, default=0)
     parser.add_argument("--paper-quantity", type=int, default=1)
-    parser.add_argument("--commission-per-side", type=float, default=0.0)
-    parser.add_argument("--slippage-points", type=float, default=1.0)
+    parser.add_argument("--commission-per-side", type=float, default=20.0)
+    parser.add_argument("--slippage-points", type=float, default=2.0)
     parser.add_argument("--auto-paper-fill", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--test-signal", choices=sorted(TEST_SIGNAL_ACTIONS), help="Send a test strategy alert")
     parser.add_argument("--test-exit", choices=sorted(TEST_EXIT_EVENTS), default="STOP", help="Exit event for close test signals")

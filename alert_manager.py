@@ -169,6 +169,40 @@ def dispatch_research_report(report, body):
     return True, detail
 
 
+def dispatch_preopen_briefing(briefing, body):
+    session_key = str(briefing.get("session_key") or "")
+    alert_key = f"PREOPEN:{session_key}"
+    title = f"微型臺指{briefing.get('session_label', '')}開盤前簡報"
+    inserted = save_alert(
+        {
+            "alert_key": alert_key,
+            "event_type": "PREOPEN_BRIEFING",
+            "title": title,
+            "body": body,
+            "status": "created",
+            "detail": "dedupe accepted",
+        }
+    )
+    if not inserted:
+        return False, "duplicate alert skipped"
+
+    sent, detail = _send_telegram(body)
+    if not sent:
+        sent, detail = _send_webhook(title, body)
+    save_alert(
+        {
+            "alert_key": f"{alert_key}:delivery",
+            "event_type": "PREOPEN_BRIEFING_DELIVERY",
+            "title": title,
+            "body": body,
+            "status": "sent" if sent else "stored",
+            "detail": detail,
+        }
+    )
+    print(body)
+    return True, detail
+
+
 def main():
     parser = argparse.ArgumentParser(description="Alert delivery utilities")
     parser.add_argument("--test", action="store_true", help="Send a Telegram test message")

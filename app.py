@@ -1036,6 +1036,7 @@ if page == "新手首頁":
 elif page == "警報服務":
     st.subheader("背景警報服務")
     st.caption("signal_worker.py 需在另一個行程常駐執行；Streamlit 只顯示狀態與紀錄。")
+    st.info("Telegram 開盤前簡報：日盤 08:35、夜盤 14:50；收盤研究報告：交易日 13:50。")
     cloud_runtime = is_streamlit_cloud_runtime()
     if cloud_runtime:
         st.error(
