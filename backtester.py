@@ -1,5 +1,6 @@
 import pandas as pd
 
+from entry_confirmation import evaluate_5m_confirmation
 from indicators import build_tech_data
 from paper_broker import PaperBroker
 from scoring import get_decision_score
@@ -300,6 +301,9 @@ def run_backtest(
     min_volume_ratio=0.85,
     max_chase_atr=1.4,
     confirmation_bars=2,
+    require_5m_confirmation=True,
+    five_minute_long_score=55,
+    five_minute_short_score=45,
     cooldown_bars=1,
     allow_long=True,
     allow_short=True,
@@ -315,8 +319,9 @@ def run_backtest(
         return pd.DataFrame(), pd.DataFrame(), {"error": "K 線資料不足，至少需要 60 根以上資料。"}
 
     try:
-        df = _normalise_kbars(df)
-        df = _resample_kbars(df, signal_timeframe)
+        normalised = _normalise_kbars(df)
+        five_minute_bars = _resample_kbars(normalised, "5min")
+        df = _resample_kbars(normalised, signal_timeframe)
     except Exception as exc:
         return pd.DataFrame(), pd.DataFrame(), {"error": str(exc)}
 
@@ -421,6 +426,21 @@ def run_backtest(
             action = "HOLD"
             message = "目前設定停用空單，跳過做空訊號。"
 
+        if action in {"BUY_LONG", "SELL_SHORT"} and require_5m_confirmation:
+            confirmation = evaluate_5m_confirmation(
+                action,
+                five_minute_bars,
+                df["ts"].iloc[i] if "ts" in df.columns else None,
+                long_confirm_score=five_minute_long_score,
+                short_confirm_score=five_minute_short_score,
+            )
+            if not confirmation["confirmed"]:
+                action = "HOLD"
+                message = "5 分進場確認未通過：" + " / ".join(
+                    confirmation.get("reasons") or [confirmation.get("status", "等待確認")]
+                )
+                fill_message = message
+
         filled = filled_by_bar
         rr_ratio = 0.0
         if action != "HOLD" and not filled_by_bar:
@@ -450,7 +470,11 @@ def run_backtest(
                 message = f"剛平倉後冷卻 {int(cooldown_bars)} 根 K，跳過新進場。"
                 fill_message = message
                 filled = False
-            elif action in {"BUY_LONG", "SELL_SHORT"} and int(confirmation_bars) >= 2:
+            elif (
+                action in {"BUY_LONG", "SELL_SHORT"}
+                and not require_5m_confirmation
+                and int(confirmation_bars) >= 2
+            ):
                 prev_history = history.iloc[:-1].copy()
                 prev_realtime = {
                     "current_price": float(prev_history["Close"].iloc[-1]),

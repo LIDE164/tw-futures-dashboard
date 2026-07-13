@@ -38,3 +38,16 @@
 [pid:5348] 2026-07-12T14:28:03.600714Z  INFO shioaji::api::api_v1::contracts::api: Loaded 2467 FUT contracts from cache
 [pid:5348] 2026-07-12T14:28:03.609271Z  INFO shioaji::api::api_v1::contracts::api: Loaded 8914 OPT contracts from cache
 [pid:5348] 2026-07-12T14:28:03.609855Z  INFO _core::api::auth::login: Loaded 53133 contracts after login
+[pid:5348] 2026-07-12T15:17:30.450151Z  INFO shioaji::api::token_pool: Successfully released token slot 2 via temporary runtime
+[pid:57224] 2026-07-12T15:18:05.124982Z  INFO shioaji::api::api_v1::auth::token_login: Found cached token from slot 2, verifying...
+[pid:57224] 2026-07-12T15:18:05.152835Z  INFO shioaji::api::api_v1::auth::token_login: Cached token is valid, using it
+[pid:57224] 2026-07-12T15:18:05.159074Z  INFO shioaji::api::api_v1::contracts::api: Loaded 127 IND contracts from cache
+[pid:57224] 2026-07-12T15:18:05.166457Z  INFO shioaji::api::api_v1::contracts::api: Loaded 41625 STK contracts from cache
+[pid:57224] 2026-07-12T15:18:05.169581Z  INFO shioaji::api::api_v1::contracts::api: Loaded 2467 FUT contracts from cache
+[pid:57224] 2026-07-12T15:18:05.173762Z  INFO shioaji::api::api_v1::contracts::api: Loaded 8914 OPT contracts from cache
+[pid:57224] 2026-07-12T15:18:05.173913Z  INFO _core::api::auth::login: Loaded 53133 contracts after login
+[pid:57224] 2026-07-13T00:00:53.772299Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed
+[pid:48044] 2026-07-13T00:31:04.555223Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed
+[pid:57224] 2026-07-13T00:31:04.843422Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed
+[pid:57224] 2026-07-13T01:00:54.311122Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed
+[pid:48044] 2026-07-13T01:00:54.427556Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed

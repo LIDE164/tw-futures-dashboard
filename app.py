@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 import charting
+from entry_confirmation import evaluate_5m_confirmation
 from home_dashboard import render_home_dashboard
 from indicators import build_tech_data
 from market_session import TAIPEI, format_datetime, get_market_status
@@ -653,7 +654,12 @@ with st.sidebar:
     min_entry_adx = st.slider("最低 ADX 趨勢強度", 10, 35, 22)
     min_entry_volume_ratio = st.slider("最低量比", 0.5, 1.5, 1.0, 0.05)
     max_chase_atr = st.slider("最大追價距離 ATR", 0.5, 3.0, 1.0, 0.1)
-    confirmation_bars = st.slider("進場連續確認 K 數", 1, 3, 2)
+    require_5m_confirmation = st.checkbox("使用 5 分 K 進場確認（實驗）", value=False)
+    five_minute_long_score = st.slider("5 分做多確認分數", 45, 60, 50)
+    five_minute_short_score = st.slider("5 分做空確認分數", 40, 55, 50)
+    confirmation_bars = 1
+    if not require_5m_confirmation:
+        confirmation_bars = st.slider("15 分連續確認 K 數", 1, 3, 2)
     cooldown_bars = st.slider("平倉後冷卻 K 數", 0, 5, 2)
     allow_long = st.checkbox("允許做多", value=True)
     allow_short = st.checkbox("允許做空", value=False)
@@ -722,6 +728,7 @@ with st.spinner("更新市場資料中..."):
     realtime = get_realtime_data_safe(api, product_root=PRODUCT_ROOT)
     raw_kbars, kbars_error = get_micro_kbars_safe(api)
     kbars = resample_signal_kbars(raw_kbars, SIGNAL_TIMEFRAME)
+    kbars_5m = resample_signal_kbars(raw_kbars, "5min")
 
 
 data_warnings = [
@@ -803,6 +810,13 @@ elif manual_position_enabled:
 else:
     st.session_state.strategy.sync_position(0, 0.0)
 action, msg = st.session_state.strategy.decide_action(score, current_price)
+five_minute_confirmation = evaluate_5m_confirmation(
+    action,
+    kbars_5m,
+    kbars["ts"].iloc[-1] if kbars is not None and not kbars.empty and "ts" in kbars.columns else None,
+    long_confirm_score=five_minute_long_score,
+    short_confirm_score=five_minute_short_score,
+)
 reference_stop = None
 if action == "BUY_LONG":
     reference_stop = current_price - effective_stop_loss_points
@@ -869,11 +883,14 @@ risk_daily_trades = getattr(risk_decision, "daily_trades", 0)
 risk_daily_pnl = getattr(risk_decision, "daily_pnl", 0)
 risk_consecutive_losses = getattr(risk_decision, "consecutive_losses", 0)
 risk_rr = float(getattr(risk_decision, "reward_risk_ratio", 0.0) or 0.0)
-can_consider_entry = entry_signal and market_status.is_open and data_is_fresh and risk_allowed
+five_minute_confirmed = not require_5m_confirmation or bool(five_minute_confirmation.get("confirmed"))
+can_consider_entry = entry_signal and market_status.is_open and data_is_fresh and risk_allowed and five_minute_confirmed
 if can_consider_entry:
     execution_status = "可考慮進場"
 elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
     execution_status = "優先處理平倉"
+elif entry_signal and require_5m_confirmation and not five_minute_confirmed:
+    execution_status = "15分成立，等待5分確認"
 elif entry_signal:
     execution_status = "方向成立，但目前不建議進場"
 else:
@@ -911,6 +928,8 @@ if page == "新手首頁":
             "risk_daily_pnl": risk_daily_pnl,
             "risk_consecutive_losses": risk_consecutive_losses,
             "freshness_label": data_freshness_label(age_seconds),
+            "five_minute_confirmation": five_minute_confirmation,
+            "require_5m_confirmation": require_5m_confirmation,
         }
     )
 
@@ -1140,6 +1159,9 @@ elif page == "回測系統":
             min_volume_ratio=min_entry_volume_ratio,
             max_chase_atr=max_chase_atr,
             confirmation_bars=confirmation_bars,
+            require_5m_confirmation=require_5m_confirmation,
+            five_minute_long_score=five_minute_long_score,
+            five_minute_short_score=five_minute_short_score,
             cooldown_bars=cooldown_bars,
             allow_long=allow_long,
             allow_short=allow_short,
@@ -1210,6 +1232,9 @@ elif page == "回測系統":
                     "reward_risk_ratio": reward_risk_ratio,
                     "min_volume_ratio": min_entry_volume_ratio,
                     "confirmation_bars": confirmation_bars,
+                    "require_5m_confirmation": require_5m_confirmation,
+                    "five_minute_long_score": five_minute_long_score,
+                    "five_minute_short_score": five_minute_short_score,
                     "cooldown_bars": cooldown_bars,
                     "allow_long": allow_long,
                     "allow_short": allow_short,
@@ -1265,6 +1290,9 @@ elif page == "回測系統":
                         "reward_risk_ratio": reward_risk_ratio,
                         "min_volume_ratio": min_entry_volume_ratio,
                         "confirmation_bars": confirmation_bars,
+                        "require_5m_confirmation": require_5m_confirmation,
+                        "five_minute_long_score": five_minute_long_score,
+                        "five_minute_short_score": five_minute_short_score,
                         "cooldown_bars": cooldown_bars,
                         "allow_long": allow_long,
                         "allow_short": allow_short,
@@ -1305,6 +1333,9 @@ elif page == "回測系統":
                         "reward_risk_ratio": reward_risk_ratio,
                         "min_volume_ratio": min_entry_volume_ratio,
                         "confirmation_bars": confirmation_bars,
+                        "require_5m_confirmation": require_5m_confirmation,
+                        "five_minute_long_score": five_minute_long_score,
+                        "five_minute_short_score": five_minute_short_score,
                         "cooldown_bars": cooldown_bars,
                         "allow_long": allow_long,
                         "allow_short": allow_short,

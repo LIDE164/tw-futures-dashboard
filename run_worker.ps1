@@ -18,6 +18,9 @@ param(
     [double]$MinVolumeRatio = 1.0,
     [double]$MaxChaseAtr = 1.0,
     [int]$ConfirmationBars = 2,
+    [switch]$Require5mConfirmation,
+    [int]$FiveMinuteLongScore = 50,
+    [int]$FiveMinuteShortScore = 50,
     [int]$CooldownBars = 2,
     [double]$BreakevenTriggerR = 1.0,
     [double]$BreakevenBufferPoints = 0,
@@ -62,12 +65,19 @@ $ArgsList = @(
     "--min-volume-ratio", "$MinVolumeRatio",
     "--max-chase-atr", "$MaxChaseAtr",
     "--confirmation-bars", "$ConfirmationBars",
+    "--five-minute-long-score", "$FiveMinuteLongScore",
+    "--five-minute-short-score", "$FiveMinuteShortScore",
     "--cooldown-bars", "$CooldownBars",
     "--breakeven-trigger-r", "$BreakevenTriggerR",
     "--breakeven-buffer-points", "$BreakevenBufferPoints",
     "--max-holding-bars", "$MaxHoldingBars",
     "--min-score-exit-profit-points", "$MinScoreExitProfitPoints"
 )
+if ($Require5mConfirmation) {
+    $ArgsList += "--require-5m-confirmation"
+} else {
+    $ArgsList += "--no-require-5m-confirmation"
+}
 if ($Once) {
     $ArgsList += "--once"
 }

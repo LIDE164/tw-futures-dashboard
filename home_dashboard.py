@@ -236,6 +236,18 @@ def render_home_dashboard(context):
             f"選擇權未平倉 P/C：{float(pc.get('oi_ratio') or 0):.2f}%｜"
             f"風險環境：{tech_data.get('風險環境', '未知')}"
         )
+        confirmation = context.get("five_minute_confirmation", {})
+        if context.get("require_5m_confirmation"):
+            if confirmation.get("confirmed"):
+                st.success(
+                    f"5 分確認通過｜{confirmation.get('bar_time') or '無時間'}｜"
+                    f"評分 {confirmation.get('score', 50)}"
+                )
+            else:
+                st.warning(
+                    f"5 分尚未確認｜{confirmation.get('status', '等待資料')}｜"
+                    + "；".join(confirmation.get("reasons") or [])
+                )
         st.info(
             f"綜合判斷：{context.get('label')}（{score} 分）。"
             "開盤跳空時原價位可能失效，請等待第一根完整 15 分 K 確認。"

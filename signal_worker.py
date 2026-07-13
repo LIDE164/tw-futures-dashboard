@@ -9,6 +9,7 @@ import sinopac_api
 from alert_manager import dispatch_alert, dispatch_preopen_briefing, dispatch_research_report
 from briefing_image import render_preopen_briefing_image
 from daily_research import format_close_research_report, run_close_research
+from entry_confirmation import evaluate_5m_confirmation
 from historical_data import get_history_status, load_continuous_kbars, upsert_contract_kbars
 from indicators import build_tech_data
 from market_data import get_public_market_data
@@ -384,6 +385,9 @@ def _research_base_kwargs(args):
         "min_volume_ratio": float(args.min_volume_ratio),
         "max_chase_atr": float(args.max_chase_atr),
         "confirmation_bars": int(args.confirmation_bars),
+        "require_5m_confirmation": bool(args.require_5m_confirmation),
+        "five_minute_long_score": int(args.five_minute_long_score),
+        "five_minute_short_score": int(args.five_minute_short_score),
         "cooldown_bars": int(args.cooldown_bars),
         "allow_long": bool(args.allow_long),
         "allow_short": bool(args.allow_short),
@@ -598,6 +602,7 @@ def evaluate_once(api, args):
         )
 
     bars = _resample_completed_bars(raw_kbars)
+    five_minute_bars = _resample_completed_bars(raw_kbars, rule="5min")
     if bars.empty:
         _update_worker_heartbeat("warning", _heartbeat_detail(market_status, realtime, bars, message="no completed 15m bar"))
         return None
@@ -683,6 +688,33 @@ def evaluate_once(api, args):
             f"preopen briefing {preopen_result['briefing'].get('session_key')}: "
             f"{preopen_result.get('delivery')}"
         )
+    if action in {"BUY_LONG", "SELL_SHORT"} and args.require_5m_confirmation:
+        confirmation = evaluate_5m_confirmation(
+            action,
+            five_minute_bars,
+            bars["ts"].iloc[-1],
+            long_confirm_score=args.five_minute_long_score,
+            short_confirm_score=args.five_minute_short_score,
+        )
+        if not confirmation["confirmed"]:
+            detail = " / ".join(confirmation.get("reasons") or [confirmation.get("status")])
+            _update_worker_heartbeat(
+                "ok",
+                _heartbeat_detail(
+                    market_status,
+                    realtime,
+                    bars,
+                    score,
+                    label,
+                    action,
+                    f"entry blocked: 5m confirmation failed: {detail}",
+                ),
+            )
+            return None
+        reasons = list(reasons or [])
+        reasons.append(
+            f"5 分確認通過：{confirmation.get('bar_time')}，評分 {confirmation.get('score')}"
+        )
     event_type = _event_type(action, message, broker, current_price)
     if action == "BUY_LONG" and not args.allow_long:
         _update_worker_heartbeat("ok", _heartbeat_detail(market_status, realtime, bars, score, label, action, "entry blocked: long side disabled"))
@@ -707,7 +739,7 @@ def evaluate_once(api, args):
                 ),
             )
             return None
-        if int(args.confirmation_bars) >= 2 and len(bars) >= 2:
+        if not args.require_5m_confirmation and int(args.confirmation_bars) >= 2 and len(bars) >= 2:
             prev_history = bars.iloc[:-1].copy()
             prev_close = float(prev_history["Close"].iloc[-1])
             prev_realtime = {
@@ -888,6 +920,9 @@ def parse_args():
     parser.add_argument("--min-volume-ratio", type=float, default=1.0)
     parser.add_argument("--max-chase-atr", type=float, default=1.0)
     parser.add_argument("--confirmation-bars", type=int, default=2)
+    parser.add_argument("--require-5m-confirmation", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--five-minute-long-score", type=int, default=50)
+    parser.add_argument("--five-minute-short-score", type=int, default=50)
     parser.add_argument("--cooldown-bars", type=int, default=2)
     parser.add_argument("--breakeven-trigger-r", type=float, default=1.0)
     parser.add_argument("--breakeven-buffer-points", type=float, default=0)
