@@ -108,7 +108,8 @@ def _daily_bars(bars, days=35):
 
 
 def _draw_title(draw, briefing):
-    _text(draw, (18, 18), f"微型臺指 盤前整合分析｜{briefing.get('session_label')}", 34, "#f4f6f8", True)
+    title = briefing.get("report_title") or f"微型臺指 盤前整合分析｜{briefing.get('session_label')}"
+    _text(draw, (18, 18), title, 34, "#f4f6f8", True)
     _text(draw, (WIDTH - 18, 24), f"資料截止 {briefing.get('last_bar_time') or '--'}", 18, "#cbd3da", False, "ra")
     _text(draw, (WIDTH - 18, 53), "歷史相似日模型每次盤前重新計算", 16, "#e2b84c", True, "ra")
 
@@ -437,7 +438,8 @@ def _draw_bottom(draw, box, briefing):
     for index, line in enumerate(explanations):
         _text(draw, (x0 + 20, y0 + 84 + index * 29), f"- {line}", 16, INK)
 
-    _text(draw, (left_end + 22, y0 + 13), "操作卡（盤前預備）", 21, INK, True)
+    hourly = briefing.get("report_mode") == "hourly"
+    _text(draw, (left_end + 22, y0 + 13), "操作卡（每小時更新）" if hourly else "操作卡（盤前預備）", 21, INK, True)
     _text(draw, (left_end + 22, y0 + 49), briefing.get("direction") or "觀望", 27, GOLD, True)
     if briefing.get("entry_price"):
         details = (
@@ -448,7 +450,8 @@ def _draw_bottom(draw, box, briefing):
         _text(draw, (left_end + 22, y0 + 117), f"1 口預估風險約 NT$ {_num(briefing.get('estimated_risk')):,.0f}", 17, DOWN, True)
     else:
         _text(draw, (left_end + 22, y0 + 91), "開盤後等待完整 15 分 K 再更新進出價", 17, INK)
-    _text(draw, (left_end + 22, y1 - 31), "盤前計畫，不是直接下單指令", 15, MUTED, True)
+    disclaimer = "盤中分析，不是直接下單指令" if hourly else "盤前計畫，不是直接下單指令"
+    _text(draw, (left_end + 22, y1 - 31), disclaimer, 15, MUTED, True)
 
 
 def render_preopen_briefing_image(briefing, bars, output_path="data/preopen_briefing_latest.png"):

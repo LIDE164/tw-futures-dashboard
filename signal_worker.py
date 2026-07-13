@@ -7,11 +7,17 @@ import pandas as pd
 
 import sinopac_api
 from adaptive_learning import apply_active_parameters
-from alert_manager import dispatch_alert, dispatch_preopen_briefing, dispatch_research_report
+from alert_manager import (
+    dispatch_alert,
+    dispatch_hourly_analysis,
+    dispatch_preopen_briefing,
+    dispatch_research_report,
+)
 from briefing_image import render_preopen_briefing_image
 from daily_research import format_close_research_report, run_close_research
 from entry_confirmation import evaluate_5m_confirmation
 from historical_data import get_history_status, load_continuous_kbars, upsert_contract_kbars
+from hourly_report import build_hourly_analysis, format_hourly_analysis
 from indicators import build_tech_data
 from market_data import get_public_market_data
 from market_session import TAIPEI, get_market_status
@@ -40,6 +46,7 @@ TEST_EXIT_EVENTS = {"STOP", "TARGET"}
 HEARTBEAT_TEXT_PATH = Path("data/signal_worker_heartbeat.txt")
 HISTORY_MAINTENANCE_STATE_KEY = "history_maintenance"
 PREOPEN_BRIEFING_STATE_KEY = "preopen_briefing"
+HOURLY_ANALYSIS_STATE_KEY = "hourly_analysis"
 
 
 def _update_worker_heartbeat(status, detail=""):
@@ -292,6 +299,98 @@ def _preopen_session(now, args):
     if night_send <= current_minutes < 15 * 60:
         return "night"
     return ""
+
+
+def _hourly_analysis_key(now, market_status, args):
+    if not args.hourly_report or not market_status.is_open:
+        return ""
+    hour = int(now.hour)
+    if market_status.session == "day" and hour not in {9, 10, 11, 12, 13}:
+        return ""
+    if market_status.session == "night" and hour not in set(range(16, 24)) | set(range(0, 5)):
+        return ""
+    return f"{now.date().isoformat()}:{market_status.session}:{hour:02d}"
+
+
+def _maybe_send_hourly_analysis(
+    now,
+    args,
+    market_status,
+    realtime,
+    bars,
+    tech_data,
+    score,
+    label,
+    reasons,
+    action,
+    message,
+    broker,
+    stop_loss_points,
+    take_profit_points,
+):
+    hour_key = _hourly_analysis_key(now, market_status, args)
+    if not hour_key or bars is None or bars.empty:
+        return None
+    state = load_json_state(HOURLY_ANALYSIS_STATE_KEY, {})
+    if state.get("last_hour_key") == hour_key:
+        return None
+
+    latest_bar = pd.to_datetime(bars["ts"].iloc[-1], errors="coerce")
+    now_naive = now.replace(tzinfo=None) if now.tzinfo is not None else now
+    if pd.isna(latest_bar) or latest_bar > now_naive or now_naive - latest_bar > timedelta(minutes=90):
+        return None
+
+    quality_reasons = evaluate_signal_quality(
+        action,
+        tech_data,
+        reject_choppy=args.reject_choppy,
+        require_60m_alignment=args.require_60m_alignment,
+        min_adx=args.min_adx,
+        min_volume_ratio=args.min_volume_ratio,
+        max_chase_atr=args.max_chase_atr,
+    )
+    public_data = get_public_market_data()
+    analysis = build_hourly_analysis(
+        hour_key=hour_key,
+        market_status=market_status,
+        realtime=realtime,
+        bars=bars,
+        tech_data=tech_data,
+        score=score,
+        label=label,
+        reasons=reasons,
+        action=action,
+        message=message,
+        public_data=public_data,
+        broker=broker,
+        stop_loss_points=stop_loss_points,
+        take_profit_points=take_profit_points,
+        commission_per_side=args.commission_per_side,
+        allow_long=args.allow_long,
+        allow_short=args.allow_short,
+        quality_reasons=quality_reasons,
+    )
+    body = format_hourly_analysis(analysis)
+    image_path = None
+    try:
+        image_path = render_preopen_briefing_image(
+            analysis,
+            bars,
+            output_path="data/hourly_analysis_latest.png",
+        )
+    except Exception as exc:
+        print(f"hourly image fallback to text: {exc}")
+    _, delivery = dispatch_hourly_analysis(analysis, body, image_path=image_path)
+    state.update(
+        {
+            "last_hour_key": hour_key,
+            "last_sent_at": now.isoformat(timespec="seconds"),
+            "last_delivery": delivery,
+            "last_bar_time": str(latest_bar),
+        }
+    )
+    save_json_state(HOURLY_ANALYSIS_STATE_KEY, state)
+    return {"analysis": analysis, "delivery": delivery}
 
 
 def _maybe_send_preopen_briefing(
@@ -674,6 +773,27 @@ def evaluate_once(api, args):
     ):
         action = "CLOSE_SHORT"
         message = f"持倉已達 {holding_bars} 根 15 分 K 且仍有獲利，執行逾時平倉。"
+    hourly_result = _maybe_send_hourly_analysis(
+        datetime.now(TAIPEI),
+        args,
+        market_status,
+        realtime,
+        bars,
+        tech_data,
+        score,
+        label,
+        reasons,
+        action,
+        message,
+        broker,
+        effective_stop_loss_points,
+        effective_take_profit_points,
+    )
+    if hourly_result:
+        print(
+            f"hourly analysis {hourly_result['analysis'].get('hour_key')}: "
+            f"{hourly_result.get('delivery')}"
+        )
     preopen_result = _maybe_send_preopen_briefing(
         datetime.now(TAIPEI),
         args,
@@ -943,6 +1063,7 @@ def parse_args():
     parser.add_argument("--min-oos-trades", type=int, default=30)
     parser.add_argument("--adaptive-learning", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--preopen-briefing", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--hourly-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--day-preopen-hour", type=int, default=8)
     parser.add_argument("--day-preopen-minute", type=int, default=35)
     parser.add_argument("--night-preopen-hour", type=int, default=14)

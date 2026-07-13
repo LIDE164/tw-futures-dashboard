@@ -235,6 +235,55 @@ def dispatch_preopen_briefing(briefing, body, image_path=None):
     return True, detail
 
 
+def dispatch_hourly_analysis(analysis, body, image_path=None):
+    hour_key = str(analysis.get("hour_key") or "")
+    alert_key = f"HOURLY_ANALYSIS:{hour_key}"
+    title = "微型臺指每小時盤中分析"
+    inserted = save_alert(
+        {
+            "alert_key": alert_key,
+            "event_type": "HOURLY_ANALYSIS",
+            "title": title,
+            "body": body,
+            "status": "created",
+            "detail": "dedupe accepted",
+        }
+    )
+    if not inserted:
+        return False, "duplicate alert skipped"
+
+    if image_path:
+        model = analysis.get("scenario_model") or {}
+        probabilities = model.get("probabilities") or {}
+        caption = (
+            "微型臺指每小時盤中分析\n"
+            f"資料截止：{analysis.get('last_bar_time')}\n"
+            f"狀態：{analysis.get('direction')}｜分數 {analysis.get('score')}\n"
+            f"偏多 {probabilities.get('bull', 0)}%｜震盪 {probabilities.get('range', 0)}%｜"
+            f"轉弱 {probabilities.get('bear', 0)}%\n"
+            "圖片為策略研究摘要，不是自動下單指令。"
+        )
+        sent, detail = _send_telegram_photo(image_path, caption)
+    else:
+        sent, detail = _send_telegram(body)
+    if not sent:
+        sent, detail = _send_telegram(body)
+    if not sent:
+        sent, detail = _send_webhook(title, body)
+    save_alert(
+        {
+            "alert_key": f"{alert_key}:delivery",
+            "event_type": "HOURLY_ANALYSIS_DELIVERY",
+            "title": title,
+            "body": body,
+            "status": "sent" if sent else "stored",
+            "detail": detail,
+        }
+    )
+    print(body)
+    return True, detail
+
+
 def main():
     parser = argparse.ArgumentParser(description="Alert delivery utilities")
     parser.add_argument("--test", action="store_true", help="Send a Telegram test message")

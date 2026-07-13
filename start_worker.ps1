@@ -24,7 +24,8 @@ param(
     [switch]$NoShort,
     [switch]$NoScoreExitRequiresProfit,
     [double]$MinScoreExitProfitPoints = 0,
-    [switch]$NoAdaptiveLearning
+    [switch]$NoAdaptiveLearning,
+    [switch]$NoHourlyReport
 )
 
 $ErrorActionPreference = "Stop"
@@ -117,6 +118,11 @@ if ($NoAdaptiveLearning) {
     $ArgsList += "--no-adaptive-learning"
 } else {
     $ArgsList += "--adaptive-learning"
+}
+if ($NoHourlyReport) {
+    $ArgsList += "--no-hourly-report"
+} else {
+    $ArgsList += "--hourly-report"
 }
 
 Write-Host "Starting signal_worker in background..."
