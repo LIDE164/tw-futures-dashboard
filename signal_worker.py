@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 import sinopac_api
+from adaptive_learning import apply_active_parameters
 from alert_manager import dispatch_alert, dispatch_preopen_briefing, dispatch_research_report
 from briefing_image import render_preopen_briefing_image
 from daily_research import format_close_research_report, run_close_research
@@ -461,6 +462,7 @@ def _maintain_history_and_report(raw_kbars, args, now=None):
         min_reference_trades=args.min_reference_trades,
         min_oos_trades=args.min_oos_trades,
         run_optimisation=now.weekday() == 4,
+        allow_auto_learning=args.adaptive_learning,
     )
     report_body = format_close_research_report(report)
     _, delivery = dispatch_research_report(report, report_body)
@@ -583,6 +585,7 @@ def send_test_signal(args):
 
 
 def evaluate_once(api, args):
+    learning_profile = apply_active_parameters(args)
     market_status = get_market_status()
     realtime = sinopac_api.get_realtime_data_from_sinopac(api, product_root=PRODUCT_ROOT)
     raw_kbars, kbars_error = sinopac_api.get_recent_micro_txf_kbars(api, days=args.days)
@@ -635,6 +638,9 @@ def evaluate_once(api, args):
     )
 
     score, label, reasons, feature = get_decision_score(tech_data, inst_data={}, with_reason=True)
+    if learning_profile.get("applied"):
+        reasons = list(reasons or [])
+        reasons.append(f"受控學習參數：{learning_profile.get('profile')}")
     current_price = float(realtime.get("current_price") or 0)
     breakeven_applied = _apply_breakeven_stop(
         broker,
@@ -935,6 +941,7 @@ def parse_args():
     parser.add_argument("--research-folds", type=int, default=3)
     parser.add_argument("--min-reference-trades", type=int, default=100)
     parser.add_argument("--min-oos-trades", type=int, default=30)
+    parser.add_argument("--adaptive-learning", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--preopen-briefing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--day-preopen-hour", type=int, default=8)
     parser.add_argument("--day-preopen-minute", type=int, default=35)

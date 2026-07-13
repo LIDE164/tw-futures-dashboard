@@ -23,7 +23,8 @@ param(
     [switch]$AllowShort,
     [switch]$NoShort,
     [switch]$NoScoreExitRequiresProfit,
-    [double]$MinScoreExitProfitPoints = 0
+    [double]$MinScoreExitProfitPoints = 0,
+    [switch]$NoAdaptiveLearning
 )
 
 $ErrorActionPreference = "Stop"
@@ -111,6 +112,11 @@ if ($NoShort -or -not $AllowShort) {
 }
 if ($NoScoreExitRequiresProfit) {
     $ArgsList += "--no-score-exit-requires-profit"
+}
+if ($NoAdaptiveLearning) {
+    $ArgsList += "--no-adaptive-learning"
+} else {
+    $ArgsList += "--adaptive-learning"
 }
 
 Write-Host "Starting signal_worker in background..."

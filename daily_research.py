@@ -2,6 +2,7 @@ from datetime import datetime
 
 import pandas as pd
 
+from adaptive_learning import process_research_learning
 from backtester import optimize_then_validate, run_backtest
 from storage import load_paper_broker_state, save_research_report
 
@@ -217,6 +218,7 @@ def run_close_research(
     min_reference_trades=100,
     min_oos_trades=30,
     run_optimisation=False,
+    allow_auto_learning=True,
 ):
     report_date = report_date or datetime.now().date().isoformat()
     history_status = dict(history_status or {})
@@ -322,6 +324,11 @@ def run_close_research(
             "reason": reason,
         },
     }
+    report["learning"] = process_research_learning(
+        report,
+        default_parameters=kwargs,
+        allow_auto_apply=allow_auto_learning,
+    )
     save_research_report(report)
     return report
 
@@ -359,6 +366,9 @@ def format_close_research_report(report):
         f"正期望區段 {walk.get('positive_folds', 0)}/{walk.get('folds', 0)}｜"
         f"樣本外 {walk.get('oos_trades', 0)} 筆｜加權期望值 NT$ {walk.get('weighted_expectancy', 0):,.0f}\n"
         f"候選：{candidate_text}\n\n"
+        f"正式參數：{learning.get('active_profile') or 'formal-15m'}｜"
+        f"挑戰者觀察 {learning.get('candidate_confirmations', 0)}/"
+        f"{learning.get('required_confirmations', 3)}\n"
         f"學習結論：{learning.get('reason') or '維持目前參數。'}\n"
         "提醒性質：歷史模擬與紙上交易統計，不代表未來獲利。"
     )
