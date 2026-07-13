@@ -157,6 +157,77 @@ def dispatch_alert(signal, event_type="SIGNAL"):
     return True, detail
 
 
+def format_whale_distribution_alert(event):
+    targets = list(event.get("pullback_targets") or [])
+    while len(targets) < 2:
+        targets.append(0)
+    delta_ratio = float(event.get("tx_delta_ratio") or 0) * 100
+    level = max(1, min(3, int(event.get("level") or 1)))
+    level_text = {1: "一級", 2: "二級", 3: "三級"}[level]
+    delta_text = {1: "開始轉弱", 2: "明顯偏空", 3: "強烈偏空"}[level]
+    first = float(event.get("first_support") or 0)
+    second = float(event.get("second_support") or 0)
+    tx_complete = float(event.get("tx_completeness_ratio") or 0) * 100
+    tx_classified = float(event.get("tx_classification_ratio") or 0) * 100
+    small_complete = float(event.get("small_completeness_ratio") or 0) * 100
+    small_classified = float(event.get("small_classification_ratio") or 0) * 100
+    body = (
+        f"【疑似大戶倒貨｜{level_text}警報】\n"
+        f"大台累積 Delta：{delta_text}（{float(event.get('tx_delta') or 0):+,.0f} 口／{delta_ratio:+.1f}%）\n"
+        f"小台主動賣量：連續 {int(event.get('small_sell_streak') or 0)} 分鐘大於買量\n"
+        f"目前價格：{float(event.get('current_price') or 0):,.0f}\n"
+        f"盤中 VWAP：{float(event.get('session_vwap') or 0):,.0f}\n\n"
+        f"資料完整率：大台 {tx_complete:.1f}%／小台 {small_complete:.1f}%\n"
+        f"可分類率：大台 {tx_classified:.1f}%／小台 {small_classified:.1f}%\n\n"
+        f"第一關（重要）：{first:,.0f}\n"
+        "跌破後若下一根完整 15 分 K 站不回，空方動能提高。\n\n"
+        f"第二關（更重要）：{second:,.0f}\n"
+        f"若再失守，可能依序回測 {float(targets[0]):,.0f}、{float(targets[1]):,.0f}。\n\n"
+        f"判斷：{event.get('judgement') or '賣壓正在增加。'}\n"
+        f"建議：{event.get('suggestion') or '停止追多，等待關鍵價位確認。'}\n\n"
+        f"逐筆更新：{event.get('last_tick_at') or '--'}\n"
+        "提醒性質：逐筆量流推估，不代表已確認特定大戶交易。"
+    )
+    return f"疑似大戶倒貨｜{level_text}警報", body
+
+
+def dispatch_whale_distribution(event):
+    session_key = str(event.get("session_key") or datetime.now().date().isoformat())
+    level = max(1, min(3, int(event.get("level") or 1)))
+    episode = int(event.get("episode") or 1)
+    event_type = f"WHALE_DISTRIBUTION_L{level}"
+    alert_key = f"WHALE_DISTRIBUTION:{session_key}:E{episode}:L{level}"
+    title, body = format_whale_distribution_alert(event)
+    inserted = save_alert(
+        {
+            "alert_key": alert_key,
+            "event_type": event_type,
+            "title": title,
+            "body": body,
+            "status": "created",
+            "detail": "dedupe accepted",
+        }
+    )
+    if not inserted:
+        return False, "duplicate alert skipped"
+
+    sent, detail = _send_telegram(body)
+    if not sent:
+        sent, detail = _send_webhook(title, body)
+    save_alert(
+        {
+            "alert_key": f"{alert_key}:delivery",
+            "event_type": f"{event_type}_DELIVERY",
+            "title": title,
+            "body": body,
+            "status": "sent" if sent else "stored",
+            "detail": detail,
+        }
+    )
+    print(body)
+    return True, detail
+
+
 def dispatch_research_report(report, body):
     report_date = str(report.get("report_date") or datetime.now().date().isoformat())
     alert_key = f"DAILY_RESEARCH:{report_date}"
@@ -238,7 +309,8 @@ def dispatch_preopen_briefing(briefing, body, image_path=None):
 def dispatch_hourly_analysis(analysis, body, image_path=None):
     hour_key = str(analysis.get("hour_key") or "")
     alert_key = f"HOURLY_ANALYSIS:{hour_key}"
-    title = "微型臺指每小時盤中分析"
+    is_flow_report = analysis.get("report_mode") == "hourly_flow"
+    title = "微型臺指｜過去一小時量流統計" if is_flow_report else "微型臺指每小時盤中分析"
     inserted = save_alert(
         {
             "alert_key": alert_key,

@@ -4,7 +4,11 @@ import pandas as pd
 
 from adaptive_learning import process_research_learning
 from backtester import optimize_then_validate, run_backtest
-from storage import load_paper_broker_state, save_research_report
+from flow_cost_research import run_flow_cost_comparison
+from storage import load_json_state, load_paper_broker_state, save_json_state, save_research_report
+
+
+FLOW_COST_RESEARCH_STATE_KEY = "flow_cost_research_latest"
 
 
 DEFAULT_BACKTEST_KWARGS = {
@@ -236,6 +240,7 @@ def run_close_research(
             "backtest": {},
             "walk_forward": {},
             "candidate": {},
+            "flow_cost": {},
             "learning": {"auto_apply": False, "reason": "尚未累積歷史 K 線。"},
         }
         save_research_report(report)
@@ -253,6 +258,7 @@ def run_close_research(
             "backtest": _plain_dict(full_summary),
             "walk_forward": {},
             "candidate": {},
+            "flow_cost": {},
             "learning": {"auto_apply": False, "reason": full_summary.get("error", "資料不足")},
         }
         save_research_report(report)
@@ -272,6 +278,15 @@ def run_close_research(
     walk_forward = _fixed_walk_forward(history, kwargs, folds=max(2, int(folds)))
     walk_summary = _walk_forward_summary(walk_forward)
     candidate = _candidate_from_validation(validation)
+    flow_cost = load_json_state(FLOW_COST_RESEARCH_STATE_KEY, {})
+    if run_optimisation or not flow_cost:
+        flow_cost = run_flow_cost_comparison(
+            history,
+            base_kwargs=kwargs,
+            train_ratio=0.70,
+            min_train_trades=max(5, min(15, backtest_trades // 5 or 5)),
+        )
+        save_json_state(FLOW_COST_RESEARCH_STATE_KEY, _plain_dict(flow_cost))
 
     enough_full_sample = backtest_trades >= int(min_reference_trades)
     enough_oos = walk_summary["oos_trades"] >= int(min_oos_trades)
@@ -313,6 +328,7 @@ def run_close_research(
         "backtest": _plain_dict(full_summary),
         "walk_forward": walk_summary,
         "candidate": candidate,
+        "flow_cost": _plain_dict(flow_cost),
         "learning": {
             "auto_apply": False,
             "candidate_refresh": "weekly" if run_optimisation else "daily statistics only",
@@ -340,12 +356,23 @@ def format_close_research_report(report):
     history = report.get("history", {})
     candidate = report.get("candidate", {})
     learning = report.get("learning", {})
+    flow_cost = report.get("flow_cost", {})
     candidate_text = "本日只更新統計；候選參數於週五收盤更新"
     if candidate:
         candidate_text = (
             f"{candidate.get('profile') or '未命名'}｜樣本外 {candidate.get('oos_trades', 0)} 筆｜"
             f"期望值 NT$ {candidate.get('oos_expectancy', 0):,.0f}｜PF {candidate.get('oos_profit_factor', 0):.2f}"
         )
+
+    baseline_flow = flow_cost.get("baseline_oos", {})
+    challenger_flow = flow_cost.get("challenger_oos", {})
+    flow_text = (
+        f"{flow_cost.get('selected_profile') or '無候選'}｜來源 {flow_cost.get('flow_source') or '無'}｜"
+        f"原策略期望 {baseline_flow.get('期望值', 0):,.0f} → "
+        f"候選 {challenger_flow.get('期望值', 0):,.0f}｜"
+        f"PF {challenger_flow.get('Profit Factor', 0):.2f}｜"
+        f"樣本外 {challenger_flow.get('交易次數', 0)} 筆"
+    )
 
     return (
         "【微型臺指收盤研究報告】\n"
@@ -366,6 +393,9 @@ def format_close_research_report(report):
         f"正期望區段 {walk.get('positive_folds', 0)}/{walk.get('folds', 0)}｜"
         f"樣本外 {walk.get('oos_trades', 0)} 筆｜加權期望值 NT$ {walk.get('weighted_expectancy', 0):,.0f}\n"
         f"候選：{candidate_text}\n\n"
+        "K線＋量流＋成本研究\n"
+        f"{flow_text}\n"
+        f"結論：{flow_cost.get('reason') or '尚無結果'}\n\n"
         f"正式參數：{learning.get('active_profile') or 'formal-15m'}｜"
         f"挑戰者觀察 {learning.get('candidate_confirmations', 0)}/"
         f"{learning.get('required_confirmations', 3)}\n"

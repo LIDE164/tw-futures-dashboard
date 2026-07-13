@@ -12,6 +12,101 @@ def _add_reason(reasons, enabled, text):
         reasons.append(text)
 
 
+def get_directional_strengths(data, with_reason=False):
+    """Return independent long/short strengths instead of treating short as low long score."""
+    if not data.get("可評分", True):
+        result = (0, 0, ["技術資料不足"], ["技術資料不足"])
+        return result if with_reason else result[:2]
+
+    trend_15m = int(_to_float(data.get("15分趨勢")))
+    trend_60m = int(_to_float(data.get("60分趨勢")))
+    adx = _to_float(data.get("ADX"))
+    volume_ratio = _to_float(data.get("量比"))
+    macd = _to_float(data.get("MACD柱"))
+    previous_macd = _to_float(data.get("前日MACD柱"))
+    choppy = bool(data.get("盤整", False))
+    long_points = 50.0
+    short_points = 50.0
+    long_reasons = []
+    short_reasons = []
+
+    if bool(data.get("多方趨勢一致")):
+        long_points += 16
+        long_reasons.append("15／60 分多方一致 +16")
+    else:
+        if trend_15m > 0:
+            long_points += 6
+            long_reasons.append("15 分偏多 +6")
+        if trend_60m > 0:
+            long_points += 8
+            long_reasons.append("60 分偏多 +8")
+        elif trend_60m < 0:
+            long_points -= 10
+
+    if bool(data.get("空方趨勢一致")):
+        short_points += 16
+        short_reasons.append("15／60 分空方一致 +16")
+    else:
+        if trend_15m < 0:
+            short_points += 6
+            short_reasons.append("15 分偏空 +6")
+        if trend_60m < 0:
+            short_points += 8
+            short_reasons.append("60 分偏空 +8")
+        elif trend_60m > 0:
+            short_points -= 10
+
+    if bool(data.get("價格站上MA20")):
+        long_points += 8
+        short_points -= 5
+        long_reasons.append("價格站上 MA20 +8")
+    if bool(data.get("價格跌破MA20")):
+        short_points += 8
+        long_points -= 5
+        short_reasons.append("價格跌破 MA20 +8")
+
+    if bool(data.get("MACD多方")):
+        long_points += 10
+        long_reasons.append("MACD 多方擴張 +10")
+    elif macd > previous_macd:
+        long_points += 4
+        long_reasons.append("MACD 動能改善 +4")
+    if bool(data.get("MACD空方")):
+        short_points += 10
+        short_reasons.append("MACD 空方擴張 +10")
+    elif macd < previous_macd:
+        short_points += 4
+        short_reasons.append("MACD 動能轉弱 +4")
+
+    if adx >= 22:
+        if trend_15m > 0:
+            long_points += 5
+            long_reasons.append(f"ADX {adx:.1f} 確認多方 +5")
+        elif trend_15m < 0:
+            short_points += 5
+            short_reasons.append(f"ADX {adx:.1f} 確認空方 +5")
+    if volume_ratio >= 1.0:
+        if trend_15m > 0:
+            long_points += 4
+            long_reasons.append(f"量比 {volume_ratio:.2f} 確認多方 +4")
+        elif trend_15m < 0:
+            short_points += 4
+            short_reasons.append(f"量比 {volume_ratio:.2f} 確認空方 +4")
+    if bool(data.get("回測有撐")):
+        long_points += 5
+        long_reasons.append("支撐回測成立 +5")
+    if choppy:
+        long_points = 50 + (long_points - 50) * 0.55
+        short_points = 50 + (short_points - 50) * 0.55
+        long_reasons.append("盤整降權")
+        short_reasons.append("盤整降權")
+
+    long_strength = max(0, min(100, int(round(long_points))))
+    short_strength = max(0, min(100, int(round(short_points))))
+    result = (long_strength, short_strength, long_reasons, short_reasons)
+    return result if with_reason else result[:2]
+
+
 def get_decision_score(data, fund_data=None, inst_data=None, with_reason=False):
     fund_data = fund_data or {}
     inst_data = inst_data or {}

@@ -19,6 +19,12 @@ from strategy import StrategyManager
 import sinopac_api
 
 try:
+    from flow_cost_research import comparison_table, run_flow_cost_comparison
+except Exception:
+    comparison_table = lambda result: pd.DataFrame()
+    run_flow_cost_comparison = lambda *args, **kwargs: {"status": "模組尚未載入"}
+
+try:
     import storage
 except Exception:
     storage = None
@@ -265,6 +271,31 @@ def get_worker_heartbeat_safe():
             "detail": result.get("detail", ""),
         }
     return {}
+
+
+def get_order_flow_quality_safe():
+    func = getattr(storage, "load_json_state", None)
+    if not func:
+        return {}
+    state = func("whale_flow_monitor", {}) or {}
+    products = state.get("products") or {}
+
+    def quality(root):
+        product = products.get(root) or {}
+        received = float(product.get("volume") or 0)
+        expected = max(
+            0.0,
+            float(product.get("exchange_total_volume") or 0)
+            - float(product.get("exchange_volume_baseline") or 0),
+        )
+        classified = float(product.get("buy_volume") or 0) + float(product.get("sell_volume") or 0)
+        return {
+            "completeness": min(received / expected, 1.0) if expected else None,
+            "classification": min(classified / received, 1.0) if received else None,
+        }
+
+    small_root = "MXF" if float((products.get("MXF") or {}).get("volume") or 0) else "TMF"
+    return {"TXF": quality("TXF"), small_root: quality(small_root), "small_root": small_root}
 
 
 def evaluate_entry_risk_compatible(action, broker, market_status, **kwargs):
@@ -663,6 +694,12 @@ with st.sidebar:
     cooldown_bars = st.slider("平倉後冷卻 K 數", 0, 5, 2)
     allow_long = st.checkbox("允許做多", value=True)
     allow_short = st.checkbox("允許做空", value=False)
+    use_directional_strength = st.checkbox("使用獨立多空強度（研究）", value=False)
+    long_strength_entry = 65
+    short_strength_entry = 65
+    if use_directional_strength:
+        long_strength_entry = st.slider("多方強度進場門檻", 55, 85, 65)
+        short_strength_entry = st.slider("空方強度進場門檻", 55, 85, 65)
     breakeven_trigger_r = st.slider("保本觸發 R", 0.0, 2.0, 1.0, 0.1)
     breakeven_buffer_points = st.number_input("保本加點", min_value=0.0, max_value=50.0, value=0.0, step=1.0)
     max_holding_bars = st.slider("最長持倉 K 數", 0, 60, 24)
@@ -956,6 +993,31 @@ elif page == "警報服務":
         h1.metric("Worker 狀態", heartbeat.get("status", "未知"))
         h2.metric("最後心跳", heartbeat.get("updated_at", "無資料"))
         st.write(heartbeat.get("detail", ""))
+        flow_quality = get_order_flow_quality_safe()
+        if flow_quality:
+            small_root = flow_quality.get("small_root", "MXF")
+            tx_quality = flow_quality.get("TXF", {})
+            small_quality = flow_quality.get(small_root, {})
+            q1, q2 = st.columns(2)
+            q1.metric(
+                "TXF 逐筆完整率",
+                f"{float(tx_quality.get('completeness')) * 100:.1f}%"
+                if tx_quality.get("completeness") is not None
+                else "等待對帳",
+                f"可分類 {float(tx_quality.get('classification') or 0) * 100:.1f}%",
+            )
+            q2.metric(
+                f"{small_root} 逐筆完整率",
+                f"{float(small_quality.get('completeness')) * 100:.1f}%"
+                if small_quality.get("completeness") is not None
+                else "等待對帳",
+                f"可分類 {float(small_quality.get('classification') or 0) * 100:.1f}%",
+            )
+            if any(
+                item.get("completeness") is not None and item["completeness"] < 0.95
+                for item in (tx_quality, small_quality)
+            ):
+                st.warning("逐筆完整率低於 95%，倒貨警報已暫停，等待資料恢復。")
     else:
         if cloud_runtime:
             st.info("雲端頁面沒有本機 worker 心跳是正常的，請不要用這個狀態判斷本機發報是否停止。")
@@ -993,6 +1055,15 @@ elif page == "警報服務":
         rp3.metric("樣本外交易", walk.get("oos_trades", 0))
         st.write(f"研究狀態：{report.get('status') or latest_research.get('status') or '無資料'}")
         st.caption(report.get("learning", {}).get("reason", ""))
+        flow_cost_report = report.get("flow_cost", {})
+        if flow_cost_report:
+            flow_challenger = flow_cost_report.get("challenger_oos", {})
+            st.write(
+                f"量流成本候選：{flow_cost_report.get('selected_profile') or '無'}｜"
+                f"樣本外期望值 {format_money(flow_challenger.get('期望值', 0))}｜"
+                f"PF {float(flow_challenger.get('Profit Factor', 0) or 0):.2f}｜"
+                f"{flow_cost_report.get('status') or '觀察中'}"
+            )
     else:
         st.info("尚無收盤研究報告；交易日 13:50 後由 worker 自動產生並發送 Telegram。")
 
@@ -1165,6 +1236,9 @@ elif page == "回測系統":
             cooldown_bars=cooldown_bars,
             allow_long=allow_long,
             allow_short=allow_short,
+            use_directional_strength=use_directional_strength,
+            long_strength_entry=long_strength_entry,
+            short_strength_entry=short_strength_entry,
             breakeven_trigger_r=breakeven_trigger_r,
             breakeven_buffer_points=breakeven_buffer_points,
             max_holding_bars=max_holding_bars,
@@ -1211,6 +1285,64 @@ elif page == "回測系統":
                 st.subheader("交易明細")
                 st.dataframe(trades, use_container_width=True)
 
+            st.subheader("K 線＋量流＋成本研究")
+            st.caption(
+                "歷史逐筆尚未累積完整時，量流採 K 棒收盤位置 × 成交量的代理值；"
+                "成本採成交金額／成交量計算的盤中 VWAP。候選只以訓練段選出，再與原策略做樣本外比較。"
+            )
+            if st.button("執行量流成本樣本外比較", use_container_width=True):
+                flow_result = run_flow_cost_comparison(
+                    raw_kbars,
+                    base_kwargs={
+                        "inst_data": {},
+                        "quantity": paper_quantity,
+                        "multiplier": contract_multiplier,
+                        "commission_per_side": commission_per_side,
+                        "slippage_points": slippage_points,
+                        "long_entry_score": long_entry_score,
+                        "short_entry_score": short_entry_score,
+                        "stop_loss_points": stop_loss_points,
+                        "take_profit_points": take_profit_points,
+                        "adaptive_risk": adaptive_risk_mode,
+                        "atr_stop_multiplier": atr_stop_multiplier,
+                        "reward_risk_ratio": reward_risk_ratio,
+                        "min_entry_rr": min_entry_rr,
+                        "reject_choppy": reject_choppy_entry,
+                        "require_60m_alignment": require_60m_alignment,
+                        "min_adx": min_entry_adx,
+                        "min_volume_ratio": min_entry_volume_ratio,
+                        "max_chase_atr": max_chase_atr,
+                        "confirmation_bars": confirmation_bars,
+                        "require_5m_confirmation": require_5m_confirmation,
+                        "five_minute_long_score": five_minute_long_score,
+                        "five_minute_short_score": five_minute_short_score,
+                        "cooldown_bars": cooldown_bars,
+                        "allow_long": allow_long,
+                        "allow_short": allow_short,
+                        "breakeven_trigger_r": breakeven_trigger_r,
+                        "breakeven_buffer_points": breakeven_buffer_points,
+                        "max_holding_bars": max_holding_bars,
+                        "score_exit_requires_profit": score_exit_requires_profit,
+                        "min_score_exit_profit_points": min_score_exit_profit_points,
+                        "signal_timeframe": SIGNAL_TIMEFRAME,
+                        "include_institutional": False,
+                    },
+                    min_train_trades=10,
+                )
+                table = comparison_table(flow_result)
+                if table.empty:
+                    st.warning(flow_result.get("reason") or flow_result.get("status") or "研究資料不足。")
+                else:
+                    st.dataframe(table, use_container_width=True)
+                    st.write(
+                        f"訓練段選出的候選：{flow_result.get('selected_profile')}｜"
+                        f"樣本外期望值差：{float(flow_result.get('expectancy_uplift', 0)):,.0f}/筆"
+                    )
+                    if flow_result.get("passed"):
+                        st.success("候選樣本外結果通過初步門檻；先紙上觀察，不自動修改正式警報。")
+                    else:
+                        st.warning(flow_result.get("reason") or "候選尚未通過樣本外門檻。")
+
             st.subheader("參數掃描")
             st.caption(
                 "掃描會比較期望值趨勢、方向分離、低回撤、高勝率與平衡型參數。"
@@ -1238,6 +1370,9 @@ elif page == "回測系統":
                     "cooldown_bars": cooldown_bars,
                     "allow_long": allow_long,
                     "allow_short": allow_short,
+                    "use_directional_strength": use_directional_strength,
+                    "long_strength_entry": long_strength_entry,
+                    "short_strength_entry": short_strength_entry,
                     "breakeven_trigger_r": breakeven_trigger_r,
                     "breakeven_buffer_points": breakeven_buffer_points,
                     "max_holding_bars": max_holding_bars,
@@ -1296,6 +1431,9 @@ elif page == "回測系統":
                         "cooldown_bars": cooldown_bars,
                         "allow_long": allow_long,
                         "allow_short": allow_short,
+                        "use_directional_strength": use_directional_strength,
+                        "long_strength_entry": long_strength_entry,
+                        "short_strength_entry": short_strength_entry,
                         "breakeven_trigger_r": breakeven_trigger_r,
                         "breakeven_buffer_points": breakeven_buffer_points,
                         "max_holding_bars": max_holding_bars,
@@ -1339,6 +1477,9 @@ elif page == "回測系統":
                         "cooldown_bars": cooldown_bars,
                         "allow_long": allow_long,
                         "allow_short": allow_short,
+                        "use_directional_strength": use_directional_strength,
+                        "long_strength_entry": long_strength_entry,
+                        "short_strength_entry": short_strength_entry,
                         "breakeven_trigger_r": breakeven_trigger_r,
                         "breakeven_buffer_points": breakeven_buffer_points,
                         "max_holding_bars": max_holding_bars,

@@ -31,6 +31,7 @@ except Exception:  # pragma: no cover
 
 
 BASE_DIR = Path(__file__).resolve().parent
+_FLOW_CALLBACKS = {}
 
 
 def _load_env_file(dotenv_path):
@@ -502,6 +503,83 @@ def get_fut_positions(api):
         )
 
     return pd.DataFrame(rows, columns=columns)
+
+
+def _quote_enum(name):
+    direct = getattr(sj, name, None) if sj is not None else None
+    if direct is not None:
+        return direct
+    constants = getattr(sj, "constant", None) if sj is not None else None
+    return getattr(constants, name, None)
+
+
+def subscribe_futures_order_flow(
+    api,
+    tick_callback,
+    bidask_callback,
+    product_roots=("TXF", "MXF", "TMF"),
+):
+    """Subscribe to futures Tick/BidAsk streams without enabling order entry."""
+    if api is None or sj is None:
+        return {"subscribed": [], "errors": ["Shioaji API 尚未連線"]}
+
+    errors = []
+    subscribed = []
+
+    try:
+        tick_decorator = getattr(api, "on_tick_fop_v1", None)
+        bidask_decorator = getattr(api, "on_bidask_fop_v1", None)
+        if not callable(tick_decorator) or not callable(bidask_decorator):
+            raise RuntimeError("目前 Shioaji 版本不支援期貨 v1 串流 callback")
+
+        @tick_decorator()
+        def _on_tick(tick):
+            tick_callback(None, tick)
+
+        @bidask_decorator()
+        def _on_bidask(quote):
+            bidask_callback(None, quote)
+
+        # Shioaji is a slots-based extension type, so references live here.
+        _FLOW_CALLBACKS[id(api)] = (_on_tick, _on_bidask)
+    except Exception as exc:
+        return {"subscribed": [], "errors": [f"逐筆 callback 設定失敗：{exc}"]}
+
+    quote_type = _quote_enum("QuoteType")
+    quote_version = _quote_enum("QuoteVersion")
+    if quote_type is None:
+        return {"subscribed": [], "errors": ["找不到 Shioaji QuoteType"]}
+
+    subscriber = getattr(api, "subscribe", None)
+    if not callable(subscriber):
+        subscriber = getattr(getattr(api, "quote", None), "subscribe", None)
+    if not callable(subscriber):
+        return {"subscribed": [], "errors": ["目前 Shioaji 版本沒有行情訂閱介面"]}
+
+    for root in product_roots:
+        try:
+            contract = get_futures_contract(api, root)
+            for kind in ("Tick", "BidAsk"):
+                kwargs = {"quote_type": getattr(quote_type, kind)}
+                if quote_version is not None and hasattr(quote_version, "v1"):
+                    kwargs["version"] = quote_version.v1
+                try:
+                    subscriber(contract, **kwargs)
+                except TypeError:
+                    kwargs.pop("version", None)
+                    subscriber(contract, **kwargs)
+            subscribed.append(
+                {
+                    "product_root": root,
+                    "contract": contract,
+                    "code": getattr(contract, "code", ""),
+                    "target_code": getattr(contract, "target_code", ""),
+                }
+            )
+        except Exception as exc:
+            errors.append(f"{root} 串流訂閱失敗：{exc}")
+
+    return {"subscribed": subscribed, "errors": errors}
 
 
 def place_futures_order(api, action, quantity=1, price=0, market=True, contract_code="TXFR1"):

@@ -1,9 +1,10 @@
 import pandas as pd
 
 from entry_confirmation import evaluate_5m_confirmation
+from flow_cost_model import add_flow_cost_features, evaluate_flow_cost_entry
 from indicators import build_tech_data
 from paper_broker import PaperBroker
-from scoring import get_decision_score
+from scoring import get_decision_score, get_directional_strengths
 from strategy import StrategyManager
 
 
@@ -96,6 +97,8 @@ def _normalise_kbars(df):
             rename_map[column] = "Close"
         elif lower == "volume":
             rename_map[column] = "Volume"
+        elif lower == "amount":
+            rename_map[column] = "Amount"
 
     df = df.rename(columns=rename_map)
     required = ["Open", "High", "Low", "Close", "Volume"]
@@ -105,6 +108,8 @@ def _normalise_kbars(df):
 
     for column in required:
         df[column] = pd.to_numeric(df[column], errors="coerce")
+    if "Amount" in df.columns:
+        df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
 
     if "ts" in df.columns:
         df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
@@ -116,18 +121,26 @@ def _resample_kbars(df, rule="15min"):
     if "ts" not in df.columns or df["ts"].isna().all():
         return df
 
+    aggregation = {
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum",
+    }
+    if "Amount" in df.columns:
+        aggregation["Amount"] = "sum"
+    for column in ("FlowBuy", "FlowSell", "SmallFlowBuy", "SmallFlowSell"):
+        if column in df.columns:
+            aggregation[column] = "sum"
+    for column in ("FlowCompleteness", "FlowClassification", "SmallFlowCompleteness", "SmallFlowClassification"):
+        if column in df.columns:
+            aggregation[column] = "min"
+
     resampled = (
         df.set_index("ts")
         .resample(rule)
-        .agg(
-            {
-                "Open": "first",
-                "High": "max",
-                "Low": "min",
-                "Close": "last",
-                "Volume": "sum",
-            }
-        )
+        .agg(aggregation)
         .dropna()
         .reset_index()
     )
@@ -314,6 +327,16 @@ def run_backtest(
     min_score_exit_profit_points=0,
     signal_timeframe="15min",
     include_institutional=False,
+    use_directional_strength=False,
+    long_strength_entry=65,
+    short_strength_entry=65,
+    use_flow_cost_filter=False,
+    flow_lookback_bars=4,
+    min_flow_ratio=0.05,
+    min_flow_volume_intensity=0.8,
+    max_cost_distance_atr=1.2,
+    require_cost_slope=True,
+    min_flow_close_location=0.0,
 ):
     if df is None or df.empty or len(df) < 60:
         return pd.DataFrame(), pd.DataFrame(), {"error": "K 線資料不足，至少需要 60 根以上資料。"}
@@ -322,6 +345,7 @@ def run_backtest(
         normalised = _normalise_kbars(df)
         five_minute_bars = _resample_kbars(normalised, "5min")
         df = _resample_kbars(normalised, signal_timeframe)
+        df = add_flow_cost_features(df, lookback_bars=flow_lookback_bars)
     except Exception as exc:
         return pd.DataFrame(), pd.DataFrame(), {"error": str(exc)}
 
@@ -399,6 +423,19 @@ def run_backtest(
             with_reason=True,
         )
         action, message = ("HOLD", fill_message) if filled_by_bar else strategy.decide_action(score, current_price)
+        long_strength, short_strength = get_directional_strengths(tech_data)
+        if use_directional_strength and not filled_by_bar and broker.position == 0:
+            long_ready = bool(allow_long and long_strength >= int(long_strength_entry))
+            short_ready = bool(allow_short and short_strength >= int(short_strength_entry))
+            if long_ready and (not short_ready or long_strength >= short_strength + 5):
+                action = "BUY_LONG"
+                message = f"獨立多方強度 {long_strength} 達到 {int(long_strength_entry)}。"
+            elif short_ready and (not long_ready or short_strength >= long_strength + 5):
+                action = "SELL_SHORT"
+                message = f"獨立空方強度 {short_strength} 達到 {int(short_strength_entry)}。"
+            else:
+                action = "HOLD"
+                message = f"方向強度未確認：多 {long_strength}／空 {short_strength}。"
         entry_bar = _open_entry_bar(broker.trades)
         holding_bars = i - entry_bar if broker.position != 0 and entry_bar is not None else 0
         if (
@@ -439,6 +476,23 @@ def run_backtest(
                 message = "5 分進場確認未通過：" + " / ".join(
                     confirmation.get("reasons") or [confirmation.get("status", "等待確認")]
                 )
+                fill_message = message
+
+        flow_cost_features = {}
+        if action in {"BUY_LONG", "SELL_SHORT"} and use_flow_cost_filter:
+            flow_reasons, flow_cost_features = evaluate_flow_cost_entry(
+                action,
+                df.iloc[i],
+                tech_data.get("ATR") or 0,
+                min_flow_ratio=min_flow_ratio,
+                min_volume_intensity=min_flow_volume_intensity,
+                max_cost_distance_atr=max_cost_distance_atr,
+                require_cost_slope=require_cost_slope,
+                min_close_location=min_flow_close_location,
+            )
+            if flow_reasons:
+                action = "HOLD"
+                message = "K線＋量流＋成本未通過：" + " / ".join(flow_reasons)
                 fill_message = message
 
         filled = filled_by_bar
@@ -487,13 +541,21 @@ def run_backtest(
                     inst_data=inst_data or {} if include_institutional else {},
                     with_reason=True,
                 )
-                missing_confirmation = (
-                    action == "BUY_LONG"
-                    and prev_score < int(long_entry_score)
-                ) or (
-                    action == "SELL_SHORT"
-                    and prev_score > int(short_entry_score)
-                )
+                if use_directional_strength:
+                    previous_long, previous_short = get_directional_strengths(prev_tech)
+                    missing_confirmation = (
+                        action == "BUY_LONG" and previous_long < int(long_strength_entry)
+                    ) or (
+                        action == "SELL_SHORT" and previous_short < int(short_strength_entry)
+                    )
+                else:
+                    missing_confirmation = (
+                        action == "BUY_LONG"
+                        and prev_score < int(long_entry_score)
+                    ) or (
+                        action == "SELL_SHORT"
+                        and prev_score > int(short_entry_score)
+                    )
                 if missing_confirmation:
                     action = "HOLD"
                     message = f"上一根分數 {prev_score} 未連續確認方向，跳過進場。"
@@ -588,6 +650,10 @@ def run_backtest(
                 "risk_stop_points": effective_stop_loss_points,
                 "risk_take_points": effective_take_profit_points,
                 "reward_risk_ratio": rr_ratio,
+                "flow_ratio": flow_cost_features.get("flow_ratio", df.iloc[i].get("FlowRatio", 0)),
+                "session_vwap": flow_cost_features.get("session_vwap", df.iloc[i].get("SessionVWAP", 0)),
+                "cost_distance_atr": flow_cost_features.get("cost_distance_atr", 0),
+                "flow_source": flow_cost_features.get("flow_source", df.iloc[i].get("FlowSource", "kbar_proxy")),
                 "realized_pnl": broker.realized_pnl,
                 "unrealized_pnl": unrealized,
                 "equity": equity,

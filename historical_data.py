@@ -91,6 +91,25 @@ def _connect(db_path=DB_PATH):
             status TEXT,
             detail TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS order_flow_minutes (
+            product_root TEXT NOT NULL,
+            session_key TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            buy_volume REAL NOT NULL DEFAULT 0,
+            sell_volume REAL NOT NULL DEFAULT 0,
+            neutral_volume REAL NOT NULL DEFAULT 0,
+            received_volume REAL NOT NULL DEFAULT 0,
+            expected_volume REAL NOT NULL DEFAULT 0,
+            completeness_ratio REAL,
+            classification_ratio REAL,
+            close REAL,
+            synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (product_root, ts)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_order_flow_minutes_ts
+        ON order_flow_minutes(ts, product_root);
         """
     )
     try:
@@ -358,6 +377,82 @@ def load_continuous_kbars(product_root="TMF", start=None, end=None, db_path=DB_P
         out["ts"] = pd.to_datetime(out["ts"], errors="coerce")
     out.attrs["source"] = "Local continuous futures history"
     out.attrs["product_root"] = str(product_root or "TMF").upper()
+    return out
+
+
+def upsert_order_flow_minutes(rows, db_path=DB_PATH):
+    values = []
+    for row in rows or []:
+        try:
+            ts = pd.to_datetime(row.get("ts"), errors="coerce")
+            if pd.isna(ts):
+                continue
+            values.append(
+                (
+                    str(row.get("product_root") or "").upper(),
+                    str(row.get("session_key") or ""),
+                    ts.strftime("%Y-%m-%d %H:%M:%S"),
+                    float(row.get("buy_volume") or 0),
+                    float(row.get("sell_volume") or 0),
+                    float(row.get("neutral_volume") or 0),
+                    float(row.get("received_volume") or 0),
+                    float(row.get("expected_volume") or 0),
+                    None if row.get("completeness_ratio") is None else float(row["completeness_ratio"]),
+                    None if row.get("classification_ratio") is None else float(row["classification_ratio"]),
+                    float(row.get("close") or 0),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return 0
+    with _connect(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO order_flow_minutes (
+                product_root, session_key, ts, buy_volume, sell_volume,
+                neutral_volume, received_volume, expected_volume,
+                completeness_ratio, classification_ratio, close
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_root, ts) DO UPDATE SET
+                session_key = excluded.session_key,
+                buy_volume = excluded.buy_volume,
+                sell_volume = excluded.sell_volume,
+                neutral_volume = excluded.neutral_volume,
+                received_volume = excluded.received_volume,
+                expected_volume = excluded.expected_volume,
+                completeness_ratio = excluded.completeness_ratio,
+                classification_ratio = excluded.classification_ratio,
+                close = excluded.close,
+                synced_at = CURRENT_TIMESTAMP
+            """,
+            values,
+        )
+    return len(values)
+
+
+def load_order_flow_minutes(start=None, end=None, db_path=DB_PATH):
+    clauses = []
+    params = []
+    if start is not None:
+        clauses.append("ts >= ?")
+        params.append(pd.to_datetime(start).strftime("%Y-%m-%d %H:%M:%S"))
+    if end is not None:
+        clauses.append("ts <= ?")
+        params.append(pd.to_datetime(end).strftime("%Y-%m-%d %H:%M:%S"))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    query = f"""
+        SELECT product_root, session_key, ts, buy_volume, sell_volume,
+               neutral_volume, received_volume, expected_volume,
+               completeness_ratio, classification_ratio, close
+        FROM order_flow_minutes
+        {where}
+        ORDER BY ts, product_root
+    """
+    with _connect(db_path) as conn:
+        out = pd.read_sql_query(query, conn, params=params)
+    if not out.empty:
+        out["ts"] = pd.to_datetime(out["ts"], errors="coerce")
     return out
 
 

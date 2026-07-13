@@ -12,11 +12,19 @@ from alert_manager import (
     dispatch_hourly_analysis,
     dispatch_preopen_briefing,
     dispatch_research_report,
+    dispatch_whale_distribution,
 )
 from briefing_image import render_preopen_briefing_image
 from daily_research import format_close_research_report, run_close_research
 from entry_confirmation import evaluate_5m_confirmation
-from historical_data import get_history_status, load_continuous_kbars, upsert_contract_kbars
+from historical_data import (
+    get_history_status,
+    load_continuous_kbars,
+    load_order_flow_minutes,
+    upsert_contract_kbars,
+    upsert_order_flow_minutes,
+)
+from flow_cost_model import merge_true_order_flow
 from hourly_report import build_hourly_analysis, format_hourly_analysis
 from indicators import build_tech_data
 from market_data import get_public_market_data
@@ -36,6 +44,7 @@ from storage import (
     update_heartbeat,
 )
 from strategy import StrategyManager
+from whale_monitor import WhaleFlowMonitor, build_distribution_event, build_test_distribution_event
 
 
 SIGNAL_TIMEFRAME = "15min"
@@ -47,6 +56,7 @@ HEARTBEAT_TEXT_PATH = Path("data/signal_worker_heartbeat.txt")
 HISTORY_MAINTENANCE_STATE_KEY = "history_maintenance"
 PREOPEN_BRIEFING_STATE_KEY = "preopen_briefing"
 HOURLY_ANALYSIS_STATE_KEY = "hourly_analysis"
+WHALE_FLOW_STATE_KEY = "whale_flow_monitor"
 
 
 def _update_worker_heartbeat(status, detail=""):
@@ -340,47 +350,20 @@ def _maybe_send_hourly_analysis(
     if pd.isna(latest_bar) or latest_bar > now_naive or now_naive - latest_bar > timedelta(minutes=90):
         return None
 
-    quality_reasons = evaluate_signal_quality(
-        action,
-        tech_data,
-        reject_choppy=args.reject_choppy,
-        require_60m_alignment=args.require_60m_alignment,
-        min_adx=args.min_adx,
-        min_volume_ratio=args.min_volume_ratio,
-        max_chase_atr=args.max_chase_atr,
-    )
-    public_data = get_public_market_data()
+    monitor = getattr(args, "_whale_monitor", None)
+    if monitor is None:
+        return None
+    flow_summary = monitor.hourly_summary(now_naive)
     analysis = build_hourly_analysis(
         hour_key=hour_key,
         market_status=market_status,
         realtime=realtime,
         bars=bars,
         tech_data=tech_data,
-        score=score,
-        label=label,
-        reasons=reasons,
-        action=action,
-        message=message,
-        public_data=public_data,
-        broker=broker,
-        stop_loss_points=stop_loss_points,
-        take_profit_points=take_profit_points,
-        commission_per_side=args.commission_per_side,
-        allow_long=args.allow_long,
-        allow_short=args.allow_short,
-        quality_reasons=quality_reasons,
+        flow_summary=flow_summary,
     )
     body = format_hourly_analysis(analysis)
-    image_path = None
-    try:
-        image_path = render_preopen_briefing_image(
-            analysis,
-            bars,
-            output_path="data/hourly_analysis_latest.png",
-        )
-    except Exception as exc:
-        print(f"hourly image fallback to text: {exc}")
-    _, delivery = dispatch_hourly_analysis(analysis, body, image_path=image_path)
+    _, delivery = dispatch_hourly_analysis(analysis, body, image_path=None)
     state.update(
         {
             "last_hour_key": hour_key,
@@ -552,6 +535,8 @@ def _maintain_history_and_report(raw_kbars, args, now=None):
 
     history_start = now.replace(tzinfo=None) - timedelta(days=max(90, int(args.research_history_days)))
     history = load_continuous_kbars(PRODUCT_ROOT, start=history_start)
+    true_flow = load_order_flow_minutes(start=history_start)
+    history = merge_true_order_flow(history, true_flow)
     report = run_close_research(
         history,
         report_date=report_date,
@@ -683,6 +668,103 @@ def send_test_signal(args):
     return 0 if sent and detail in {"telegram sent", "webhook sent", "duplicate alert skipped"} else 1
 
 
+def send_test_whale_alert(args):
+    event = build_test_distribution_event(args.test_price, level=args.test_whale_level)
+    event["episode"] = 1
+    # Give each explicit test a unique session key without weakening live dedupe.
+    event["session_key"] = f"{event['session_key']}:{datetime.now(TAIPEI):%H%M%S}"
+    sent, detail = dispatch_whale_distribution(event)
+    event_type = event["event_type"]
+    _update_worker_heartbeat("test", f"{event_type}: {detail}")
+    print(f"{event_type}: {detail}")
+    return 0 if sent and detail in {"telegram sent", "webhook sent", "duplicate alert skipped"} else 1
+
+
+def _setup_whale_monitor(api, args):
+    monitor = WhaleFlowMonitor(
+        delta_ratio_threshold=args.whale_delta_ratio,
+        sell_streak_minutes=args.whale_sell_streak,
+        min_tx_volume=args.whale_min_tx_volume,
+        level1_delta_ratio_threshold=args.whale_level1_delta_ratio,
+        level1_sell_streak_minutes=args.whale_level1_sell_streak,
+        level1_min_tx_volume=args.whale_level1_min_tx_volume,
+        min_completeness_ratio=args.whale_min_completeness,
+        min_classification_ratio=args.whale_min_classification,
+    )
+    monitor.restore_state(load_json_state(WHALE_FLOW_STATE_KEY, {}))
+    subscription = sinopac_api.subscribe_futures_order_flow(
+        api,
+        monitor.on_tick,
+        monitor.on_bidask,
+        product_roots=("TXF", "MXF", "TMF"),
+    )
+    for item in subscription.get("subscribed") or []:
+        monitor.register_contract(item.get("product_root"), item.get("contract"))
+    args._whale_monitor = monitor
+    return subscription
+
+
+def _maybe_send_whale_distribution(args, market_status, realtime, bars, tech_data, persist=True):
+    monitor = getattr(args, "_whale_monitor", None)
+    if not args.whale_alert or monitor is None or not getattr(market_status, "is_open", False):
+        return None
+
+    now = datetime.now(TAIPEI).replace(tzinfo=None)
+    flow = monitor.snapshot(now)
+    if persist:
+        try:
+            upsert_order_flow_minutes(monitor.minute_records(last_minutes=3))
+        except Exception as exc:
+            print(f"order flow persistence warning: {exc}")
+    live_realtime = dict(realtime or {})
+    if float(flow.get("current_price") or 0) > 0:
+        live_realtime["current_price"] = float(flow["current_price"])
+    event = build_distribution_event(
+        flow,
+        live_realtime,
+        bars,
+        tech_data=tech_data,
+        now=now,
+    )
+    if not event:
+        monitor.transition_level(0, now)
+        if persist:
+            save_json_state(WHALE_FLOW_STATE_KEY, monitor.export_state())
+        return None
+    if not monitor.transition_level(event.get("level"), now):
+        if persist:
+            save_json_state(WHALE_FLOW_STATE_KEY, monitor.export_state())
+        return None
+    event["episode"] = monitor.alert_episode()
+    monitor.record_event(event)
+    save_json_state(WHALE_FLOW_STATE_KEY, monitor.export_state())
+    sent, detail = dispatch_whale_distribution(event)
+    return {"event": event, "sent": sent, "delivery": detail}
+
+
+def _wait_with_whale_checks(args):
+    remaining = max(0.0, float(args.interval))
+    check_interval = max(1.0, float(args.whale_check_interval))
+    while remaining > 0:
+        step = min(check_interval, remaining)
+        time.sleep(step)
+        remaining -= step
+        context = getattr(args, "_whale_context", None)
+        if not args.whale_alert or not context:
+            continue
+        try:
+            _maybe_send_whale_distribution(
+                args,
+                context["market_status"],
+                context["realtime"],
+                context["bars"],
+                context["tech_data"],
+                persist=False,
+            )
+        except Exception as exc:
+            print(f"whale flow quick check error: {exc}")
+
+
 def evaluate_once(api, args):
     learning_profile = apply_active_parameters(args)
     market_status = get_market_status()
@@ -720,6 +802,24 @@ def evaluate_once(api, args):
     broker.slippage_points = args.slippage_points
     worker_state = _reconcile_worker_trade_state(broker, bars)
     tech_data = build_tech_data(bars, realtime)
+    args._whale_context = {
+        "market_status": market_status,
+        "realtime": dict(realtime or {}),
+        "bars": bars,
+        "tech_data": dict(tech_data or {}),
+    }
+    whale_result = _maybe_send_whale_distribution(
+        args,
+        market_status,
+        realtime,
+        bars,
+        tech_data,
+    )
+    if whale_result:
+        print(
+            f"whale distribution {whale_result['event'].get('status_key')}: "
+            f"{whale_result.get('delivery')}"
+        )
     effective_stop_loss_points, effective_take_profit_points = _effective_risk_points(args, tech_data)
     strategy = StrategyManager(
         long_entry_score=args.long_entry_score,
@@ -1005,12 +1105,30 @@ def evaluate_once(api, args):
 def run_worker(args):
     if args.test_signal:
         return send_test_signal(args)
+    if args.test_whale_alert:
+        return send_test_whale_alert(args)
 
     api, api_error = sinopac_api.get_api(simulation=args.simulation)
     if api_error:
         _update_worker_heartbeat("error", api_error)
         print(api_error)
         return 1
+
+    if args.whale_alert:
+        subscription = _setup_whale_monitor(api, args)
+        subscribed = subscription.get("subscribed") or []
+        errors = subscription.get("errors") or []
+        print(
+            "whale flow subscriptions: "
+            + (", ".join(item.get("product_root", "") for item in subscribed) or "none")
+        )
+        for error in errors:
+            print(error)
+        if not subscribed:
+            _update_worker_heartbeat(
+                "warning",
+                "大戶量流監控未訂閱成功；策略 Worker 繼續執行，但不會發倒貨警報。",
+            )
 
     while True:
         try:
@@ -1023,7 +1141,7 @@ def run_worker(args):
 
         if args.once:
             return 0
-        time.sleep(args.interval)
+        _wait_with_whale_checks(args)
 
 
 def parse_args():
@@ -1076,6 +1194,18 @@ def parse_args():
     parser.add_argument("--commission-per-side", type=float, default=20.0)
     parser.add_argument("--slippage-points", type=float, default=2.0)
     parser.add_argument("--auto-paper-fill", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--whale-alert", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--whale-delta-ratio", type=float, default=-0.08)
+    parser.add_argument("--whale-sell-streak", type=int, default=4)
+    parser.add_argument("--whale-min-tx-volume", type=int, default=100)
+    parser.add_argument("--whale-check-interval", type=float, default=2.0)
+    parser.add_argument("--whale-level1-delta-ratio", type=float, default=-0.04)
+    parser.add_argument("--whale-level1-sell-streak", type=int, default=2)
+    parser.add_argument("--whale-level1-min-tx-volume", type=int, default=50)
+    parser.add_argument("--whale-min-completeness", type=float, default=0.95)
+    parser.add_argument("--whale-min-classification", type=float, default=0.80)
+    parser.add_argument("--test-whale-alert", action="store_true", help="Send a synthetic whale-distribution alert")
+    parser.add_argument("--test-whale-level", type=int, choices=(1, 2, 3), default=2)
     parser.add_argument("--test-signal", choices=sorted(TEST_SIGNAL_ACTIONS), help="Send a test strategy alert")
     parser.add_argument("--test-exit", choices=sorted(TEST_EXIT_EVENTS), default="STOP", help="Exit event for close test signals")
     parser.add_argument("--test-price", type=float, default=25000.0, help="Reference price for --test-signal")
