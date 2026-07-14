@@ -48,6 +48,10 @@ class WhaleFlowMonitor:
         level1_min_tx_volume=50,
         min_completeness_ratio=0.95,
         min_classification_ratio=0.80,
+        burst_window_minutes=3,
+        burst_delta_ratio_threshold=-0.12,
+        burst_small_delta_ratio_threshold=-0.08,
+        burst_min_tx_volume=300,
     ):
         self.delta_ratio_threshold = float(delta_ratio_threshold)
         self.sell_streak_minutes = int(sell_streak_minutes)
@@ -57,6 +61,10 @@ class WhaleFlowMonitor:
         self.level1_min_tx_volume = int(level1_min_tx_volume)
         self.min_completeness_ratio = float(min_completeness_ratio)
         self.min_classification_ratio = float(min_classification_ratio)
+        self.burst_window_minutes = max(2, int(burst_window_minutes))
+        self.burst_delta_ratio_threshold = float(burst_delta_ratio_threshold)
+        self.burst_small_delta_ratio_threshold = float(burst_small_delta_ratio_threshold)
+        self.burst_min_tx_volume = float(burst_min_tx_volume)
         self._lock = RLock()
         self._code_to_product = {}
         self._session_key = ""
@@ -253,12 +261,21 @@ class WhaleFlowMonitor:
 
     def snapshot(self, now=None):
         now = (now or datetime.now()).replace(tzinfo=None)
+
+        def product_copy(product):
+            copied = dict(product or self._empty_product())
+            copied["minutes"] = OrderedDict(
+                (key, dict(values or {}))
+                for key, values in (copied.get("minutes") or {}).items()
+            )
+            return copied
+
         with self._lock:
             self._roll_session(now)
-            tx = dict(self._products.get("TXF") or self._empty_product())
+            tx = product_copy(self._products.get("TXF"))
             small_root = "MXF" if self._products.get("MXF", {}).get("volume", 0) else "TMF"
-            small = dict(self._products.get(small_root) or self._empty_product())
-            micro = dict(self._products.get("TMF") or self._empty_product())
+            small = product_copy(self._products.get(small_root))
+            micro = product_copy(self._products.get("TMF"))
 
         tx_buy = _number(tx.get("buy_volume"))
         tx_sell = _number(tx.get("sell_volume"))
@@ -266,6 +283,10 @@ class WhaleFlowMonitor:
         tx_delta = tx_buy - tx_sell
         tx_delta_ratio = tx_delta / tx_total if tx_total else 0.0
         streak, completed_minutes = self._sell_streak(small, now)
+        burst_end = now.replace(second=0, microsecond=0)
+        burst_start = burst_end - timedelta(minutes=self.burst_window_minutes)
+        tx_burst = self._aggregate_minutes(tx.get("minutes"), burst_start, burst_end)
+        small_burst = self._aggregate_minutes(small.get("minutes"), burst_start, burst_end)
         vwap_source = micro if _number(micro.get("volume")) else small
         vwap = _number(vwap_source.get("amount")) / _number(vwap_source.get("volume")) if _number(vwap_source.get("volume")) else 0.0
         product_quality = {
@@ -287,6 +308,30 @@ class WhaleFlowMonitor:
             )
 
         data_quality_ready = quality_passes(tx_quality) and quality_passes(small_quality)
+
+        def burst_quality_passes(values):
+            completeness = values.get("completeness_ratio")
+            classification = values.get("classification_ratio")
+            return bool(
+                completeness is not None
+                and completeness >= self.min_completeness_ratio
+                and classification is not None
+                and classification >= self.min_classification_ratio
+            )
+
+        burst_data_quality_ready = bool(
+            tx_burst.get("minute_count") >= self.burst_window_minutes
+            and small_burst.get("minute_count") >= self.burst_window_minutes
+            and burst_quality_passes(tx_burst)
+            and burst_quality_passes(small_burst)
+        )
+        burst_ready = bool(
+            burst_data_quality_ready
+            and _number(tx_burst.get("classified_volume")) >= self.burst_min_tx_volume
+            and _number(tx_burst.get("delta_ratio")) <= self.burst_delta_ratio_threshold
+            and _number(small_burst.get("delta_ratio")) <= self.burst_small_delta_ratio_threshold
+            and int(small_burst.get("sell_dominant_minutes") or 0) >= 2
+        )
 
         timestamps = [
             pd.to_datetime(item.get("last_tick_at"), errors="coerce")
@@ -336,6 +381,22 @@ class WhaleFlowMonitor:
             "level1_delta_ratio_threshold": self.level1_delta_ratio_threshold,
             "level1_sell_streak_minutes": self.level1_sell_streak_minutes,
             "level1_min_tx_volume": self.level1_min_tx_volume,
+            "burst_window_minutes": self.burst_window_minutes,
+            "burst_ready": burst_ready,
+            "burst_data_quality_ready": burst_data_quality_ready,
+            "burst_tx_volume": _number(tx_burst.get("classified_volume")),
+            "burst_tx_delta": _number(tx_burst.get("delta")),
+            "burst_tx_delta_ratio": _number(tx_burst.get("delta_ratio")),
+            "burst_small_delta": _number(small_burst.get("delta")),
+            "burst_small_delta_ratio": _number(small_burst.get("delta_ratio")),
+            "burst_small_sell_minutes": int(small_burst.get("sell_dominant_minutes") or 0),
+            "burst_tx_completeness_ratio": tx_burst.get("completeness_ratio"),
+            "burst_tx_classification_ratio": tx_burst.get("classification_ratio"),
+            "burst_small_completeness_ratio": small_burst.get("completeness_ratio"),
+            "burst_small_classification_ratio": small_burst.get("classification_ratio"),
+            "burst_delta_ratio_threshold": self.burst_delta_ratio_threshold,
+            "burst_small_delta_ratio_threshold": self.burst_small_delta_ratio_threshold,
+            "burst_min_tx_volume": self.burst_min_tx_volume,
         }
 
     def transition_level(self, level, now=None, reset_after_minutes=5):
@@ -602,11 +663,13 @@ def build_distribution_event(flow, realtime, bars, tech_data=None, now=None):
     level1_min_volume = float(flow.get("level1_min_tx_volume", 50) or 50)
     level1_delta_threshold = float(flow.get("level1_delta_ratio_threshold", -0.04) or -0.04)
     level1_streak = int(flow.get("level1_sell_streak_minutes", 2) or 2)
-    level1_ready = bool(
+    cumulative_level1_ready = bool(
         tx_total >= level1_min_volume
         and delta_ratio <= level1_delta_threshold
         and sell_streak >= level1_streak
     )
+    burst_ready = bool(flow.get("burst_ready"))
+    level1_ready = cumulative_level1_ready or burst_ready
     if not level1_ready:
         return None
 
@@ -619,13 +682,32 @@ def build_distribution_event(flow, realtime, bars, tech_data=None, now=None):
     level2_min_volume = float(flow.get("min_tx_volume", 100) or 100)
     level2_delta_threshold = float(flow.get("delta_ratio_threshold", -0.08) or -0.08)
     level2_streak = int(flow.get("sell_streak_minutes", 4) or 4)
-    level2_ready = bool(
+    cumulative_level2_ready = bool(
         tx_total >= level2_min_volume
         and delta_ratio <= level2_delta_threshold
         and sell_streak >= level2_streak
         and vwap > 0
         and current_price < vwap
     )
+    burst_window = int(flow.get("burst_window_minutes") or 3)
+    burst_tx_ratio = _number(flow.get("burst_tx_delta_ratio"))
+    burst_small_ratio = _number(flow.get("burst_small_delta_ratio"))
+    burst_sell_minutes = int(flow.get("burst_small_sell_minutes") or 0)
+    burst_level2_ready = bool(
+        burst_ready
+        and burst_tx_ratio <= -0.18
+        and burst_small_ratio <= -0.12
+        and burst_sell_minutes >= burst_window
+        and vwap > 0
+        and current_price < vwap
+    )
+    level2_ready = cumulative_level2_ready or burst_level2_ready
+    if burst_ready and cumulative_level1_ready:
+        trigger_mode = "累積 Delta＋短線急殺"
+    elif burst_ready:
+        trigger_mode = f"最近 {burst_window} 分鐘急殺"
+    else:
+        trigger_mode = "交易時段累積 Delta"
     level = 1
     if level2_ready:
         level = 2
@@ -659,12 +741,19 @@ def build_distribution_event(flow, realtime, bars, tech_data=None, now=None):
         "level": level,
         "session_key": flow.get("session_key", ""),
         "status_key": status_key,
+        "trigger_mode": trigger_mode,
         "tx_delta": _number(flow.get("tx_delta")),
         "tx_delta_ratio": delta_ratio,
         "tx_buy_volume": _number(flow.get("tx_buy_volume")),
         "tx_sell_volume": _number(flow.get("tx_sell_volume")),
         "small_product": flow.get("small_product", "MXF"),
         "small_sell_streak": int(flow.get("small_sell_streak") or 0),
+        "burst_window_minutes": burst_window,
+        "burst_tx_delta": _number(flow.get("burst_tx_delta")),
+        "burst_tx_delta_ratio": burst_tx_ratio,
+        "burst_small_delta": _number(flow.get("burst_small_delta")),
+        "burst_small_delta_ratio": burst_small_ratio,
+        "burst_small_sell_minutes": burst_sell_minutes,
         "current_price": current_price,
         "session_vwap": vwap,
         "first_support": first,
@@ -701,12 +790,19 @@ def build_test_distribution_event(price=45520, level=2):
         "level": level,
         "session_key": f"{datetime.now().date().isoformat()}:test",
         "status_key": {1: "early_distribution", 2: "watch", 3: "first_broken"}[level],
+        "trigger_mode": "最近 3 分鐘急殺（測試）",
         "tx_delta": {1: -420, 2: -1280, 3: -2380}[level],
         "tx_delta_ratio": {1: -0.052, 2: -0.126, 3: -0.214}[level],
         "tx_buy_volume": 4200,
         "tx_sell_volume": {1: 4620, 2: 5480, 3: 6580}[level],
         "small_product": "MXF",
         "small_sell_streak": {1: 2, 2: 4, 3: 7}[level],
+        "burst_window_minutes": 3,
+        "burst_tx_delta": {1: -360, 2: -820, 3: -1280}[level],
+        "burst_tx_delta_ratio": {1: -0.13, 2: -0.21, 3: -0.28}[level],
+        "burst_small_delta": {1: -520, 2: -1250, 3: -1880}[level],
+        "burst_small_delta_ratio": {1: -0.10, 2: -0.18, 3: -0.25}[level],
+        "burst_small_sell_minutes": 3,
         "current_price": price,
         "session_vwap": price + 55,
         "first_support": first,

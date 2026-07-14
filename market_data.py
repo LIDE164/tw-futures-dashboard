@@ -1,14 +1,24 @@
 from io import StringIO
+import re
 from urllib.request import Request, urlopen
 
 import pandas as pd
+
+try:
+    import yfinance as yf
+except Exception:  # pragma: no cover
+    yf = None
+
+from storage import load_json_state, save_json_state
 
 
 TAIFEX_HEADERS = {"User-Agent": "Mozilla/5.0"}
 PC_RATIO_URL = "https://www.taifex.com.tw/cht/3/pcRatio"
 OPTION_DAILY_URL = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
 OPTION_LIQUIDITY_URL = "https://www.taifex.com.tw/cht/3/optDailyLi"
-FUT_CONTRACTS_URL = "https://www.taifex.com.tw/cht/3/futContractsDate"
+FUT_CONTRACTS_URL = "https://www.taifex.com.tw/cht/3/futContractsDateExcel"
+LARGE_TRADER_URL = "https://www.taifex.com.tw/cht/3/largeTraderFutQryTbl"
+PUBLIC_HISTORY_STATE_KEY = "public_market_history"
 
 
 def _read_html_tables(url, **kwargs):
@@ -25,6 +35,31 @@ def _to_number(value, default=0.0):
         return float(str(value).replace(",", "").strip())
     except (TypeError, ValueError):
         return default
+
+
+def _first_number(value, default=0.0):
+    match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", str(value or ""))
+    return _to_number(match.group(0), default) if match else default
+
+
+def _table_date(table):
+    if table is None or table.empty:
+        return None
+    text = " ".join(str(value) for value in table.astype(str).to_numpy().ravel())
+    match = re.search(r"\d{4}/\d{2}/\d{2}", text)
+    return match.group(0) if match else None
+
+
+def _futures_contract_tables():
+    # The Excel view contains a short metadata table and a three-row-header data
+    # table. pandas already preserves the data table's HTML header as MultiIndex;
+    # forcing header=[0,1,2] onto the metadata table raises before parsing data.
+    tables = _read_html_tables(FUT_CONTRACTS_URL)
+    if not tables:
+        raise ValueError("TAIFEX 三大法人資料表為空")
+    data = max(tables, key=lambda table: table.shape[1])
+    meta = next((table for table in tables if table is not data), pd.DataFrame())
+    return data, _table_date(meta) or _table_date(data)
 
 
 def get_pc_ratio():
@@ -101,7 +136,7 @@ def get_option_pressure_support():
 
 def get_mtx_institutional_net():
     try:
-        df = _read_html_tables(FUT_CONTRACTS_URL, header=[0, 1, 2])[0]
+        df, data_date = _futures_contract_tables()
         rows = df[df.iloc[:, 1].astype(str).str.contains("小型臺指期貨", regex=False, na=False)]
 
         if rows.empty:
@@ -121,6 +156,7 @@ def get_mtx_institutional_net():
             "short_oi": short_oi,
             "net_oi": net_oi,
             "long_short_ratio": ratio,
+            "date": data_date,
             "source": "TAIFEX 三大法人期貨未平倉",
             "error": None,
         }
@@ -131,16 +167,25 @@ def get_mtx_institutional_net():
             "short_oi": 0,
             "net_oi": 0,
             "long_short_ratio": None,
+            "date": None,
             "source": "TAIFEX 三大法人期貨未平倉",
             "error": f"TAIFEX 小台法人資料讀取失敗：{exc}",
         }
 
 
 def get_txf_institutional_oi():
-    result = {"外資": 0, "投信": 0, "自營商": 0, "date": None, "error": None}
+    result = {
+        "外資": 0,
+        "投信": 0,
+        "自營商": 0,
+        "合計": 0,
+        "date": None,
+        "source": "TAIFEX 三大法人期貨未平倉",
+        "error": None,
+    }
 
     try:
-        df = _read_html_tables(FUT_CONTRACTS_URL, header=[0, 1, 2])[0]
+        df, data_date = _futures_contract_tables()
         rows = df[df.iloc[:, 1].astype(str).str.contains("臺股期貨", regex=False, na=False)]
 
         if rows.empty:
@@ -161,11 +206,119 @@ def get_txf_institutional_oi():
                     result[output_name] = net_oi
                     break
 
-        result["date"] = "TAIFEX 最新交易日"
+        result["合計"] = result["外資"] + result["投信"] + result["自營商"]
+        result["date"] = data_date
         return result
     except Exception as exc:
         result["error"] = f"TAIFEX 臺股期貨法人資料讀取失敗：{exc}"
         return result
+
+
+def get_large_trader_oi():
+    """Return the official near-month top-10 TX-equivalent position structure."""
+    try:
+        tables = _read_html_tables(LARGE_TRADER_URL)
+        if len(tables) < 2:
+            raise ValueError("TAIFEX 大額交易人表格不足")
+        data_date = _table_date(tables[0])
+        df = max(tables, key=lambda table: table.shape[1])
+        rows = df[df.iloc[:, 0].astype(str).str.contains("臺股期貨", regex=False, na=False)].copy()
+        rows = rows[
+            ~rows.iloc[:, 1].astype(str).str.contains("週契約|所有", regex=True, na=False)
+        ]
+        if rows.empty:
+            raise ValueError("找不到臺股期貨近月大額交易人資料")
+        row = rows.iloc[0]
+        long_oi = int(_first_number(row.iloc[4]))
+        short_oi = int(_first_number(row.iloc[8]))
+        return {
+            "date": data_date,
+            "expiry": str(row.iloc[1]).replace(" ", ""),
+            "long_oi": long_oi,
+            "short_oi": short_oi,
+            "net_oi": long_oi - short_oi,
+            "market_oi": int(_first_number(row.iloc[10])),
+            "source": "TAIFEX 期貨大額交易人未沖銷部位",
+            "scope": "臺股期貨 TX+MTX/4+TMF/20 近月前十大",
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "date": None,
+            "expiry": None,
+            "long_oi": 0,
+            "short_oi": 0,
+            "net_oi": None,
+            "market_oi": 0,
+            "source": "TAIFEX 期貨大額交易人未沖銷部位",
+            "scope": "臺股期貨 TX+MTX/4+TMF/20 近月前十大",
+            "error": f"TAIFEX 大額交易人資料讀取失敗：{exc}",
+        }
+
+
+def get_international_market_data():
+    tickers = {"^SOX": "SOX", "^IXIC": "NASDAQ", "NVDA": "NVIDIA", "TSM": "台積電 ADR"}
+    result = {"items": [], "sox_history": [], "source": "Yahoo Finance", "error": None}
+    if yf is None:
+        result["error"] = "yfinance 尚未安裝"
+        return result
+    try:
+        data = yf.download(
+            list(tickers), period="3mo", interval="1d", group_by="ticker",
+            auto_adjust=False, progress=False, threads=True,
+        )
+        for symbol, label in tickers.items():
+            frame = data[symbol] if isinstance(data.columns, pd.MultiIndex) and symbol in data.columns.levels[0] else pd.DataFrame()
+            close = frame.get("Close", pd.Series(dtype=float)).dropna()
+            if len(close) < 1:
+                result["items"].append({"symbol": symbol, "label": label, "last": None, "change_pct": None})
+                continue
+            last = float(close.iloc[-1])
+            previous = float(close.iloc[-2]) if len(close) > 1 else last
+            result["items"].append(
+                {
+                    "symbol": symbol,
+                    "label": label,
+                    "last": last,
+                    "change_pct": (last / previous - 1) * 100 if previous else 0.0,
+                    "date": pd.Timestamp(close.index[-1]).strftime("%Y/%m/%d"),
+                }
+            )
+            if symbol == "^SOX":
+                result["sox_history"] = [
+                    {"date": pd.Timestamp(index).strftime("%Y/%m/%d"), "close": float(value)}
+                    for index, value in close.tail(65).items()
+                ]
+        return result
+    except Exception as exc:
+        result["error"] = f"Yahoo Finance 國際行情讀取失敗：{exc}"
+        return result
+
+
+def _record_public_history(payload):
+    history = load_json_state(PUBLIC_HISTORY_STATE_KEY, {"rows": []})
+    rows = list(history.get("rows") or [])
+    institutional = payload.get("txf_institutional") or {}
+    mtx = payload.get("mtx_net") or {}
+    large = payload.get("large_trader") or {}
+    date = institutional.get("date") or mtx.get("date") or large.get("date")
+    if not date:
+        return rows[-20:]
+    row = {
+        "date": date,
+        "mtx_ratio": mtx.get("long_short_ratio"),
+        "mtx_net": mtx.get("net_oi"),
+        "foreign": institutional.get("外資"),
+        "trust": institutional.get("投信"),
+        "dealer": institutional.get("自營商"),
+        "institutional_total": institutional.get("合計"),
+        "large_trader_net": large.get("net_oi"),
+    }
+    rows = [item for item in rows if item.get("date") != date]
+    rows.append(row)
+    rows = sorted(rows, key=lambda item: str(item.get("date"))) [-120:]
+    save_json_state(PUBLIC_HISTORY_STATE_KEY, {"rows": rows})
+    return rows[-20:]
 
 
 def get_public_market_data():
@@ -173,17 +326,27 @@ def get_public_market_data():
     option_levels = get_option_pressure_support()
     mtx_net = get_mtx_institutional_net()
     txf_institutional = get_txf_institutional_oi()
+    large_trader = get_large_trader_oi()
+    international = get_international_market_data()
 
     errors = [
         item.get("error")
-        for item in (pc_ratio, option_levels, mtx_net, txf_institutional)
+        for item in (pc_ratio, option_levels, mtx_net, txf_institutional, large_trader, international)
         if item.get("error")
     ]
 
-    return {
+    result = {
         "pc_ratio": pc_ratio,
         "option_levels": option_levels,
         "mtx_net": mtx_net,
         "txf_institutional": txf_institutional,
+        "large_trader": large_trader,
+        "international": international,
         "errors": errors,
     }
+    try:
+        result["history"] = _record_public_history(result)
+    except Exception as exc:
+        result["history"] = []
+        result["errors"].append(f"公開資料歷史保存失敗：{exc}")
+    return result

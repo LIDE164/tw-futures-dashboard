@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from direction_observation import build_direction_observation, format_direction_observation
 from whale_monitor import derive_downside_levels
 
 
@@ -65,6 +66,12 @@ def build_hourly_analysis(
 
     coverage = int(flow_summary.get("coverage_minutes") or 0)
     data_status = "完整" if coverage >= 50 else f"部分資料（{coverage}/60 分鐘）"
+    direction_observation = build_direction_observation(
+        tech_data,
+        snapshot,
+        current_price=current_price,
+        session_vwap=vwap,
+    )
     return {
         "report_mode": "hourly_flow",
         "report_title": "微型臺指｜過去一小時量流統計",
@@ -81,6 +88,7 @@ def build_hourly_analysis(
         "event_counts": {int(key): int(value or 0) for key, value in events.items()},
         "direction": direction,
         "judgement": judgement,
+        "direction_observation": direction_observation,
         "first_support": levels["first_support"],
         "second_support": levels["second_support"],
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -138,5 +146,6 @@ def format_hourly_analysis(analysis):
         f"第二關：{_number(analysis.get('second_support')):,.0f}\n"
         f"一小時結論：{analysis.get('direction') or '資料不足'}\n"
         f"判斷：{analysis.get('judgement') or '等待更多逐筆資料。'}\n\n"
+        f"{format_direction_observation(analysis.get('direction_observation'))}\n\n"
         "提醒性質：主動買賣量為逐筆推估，僅供風險觀察，不代表特定大戶身分。"
     )

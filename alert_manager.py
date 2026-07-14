@@ -7,6 +7,7 @@ try:
 except Exception:  # pragma: no cover
     requests = None
 
+from direction_observation import format_direction_observation
 from storage import save_alert
 
 
@@ -16,13 +17,26 @@ def build_alert_key(event_type, contract_code, bar_time, action, entry_price=0):
 
 def format_signal_alert(signal, event_type="SIGNAL"):
     title = "微型臺指策略提醒"
+    if event_type.startswith("ENTRY"):
+        title = "微型臺指正式交易候選"
     if event_type.startswith("EXIT"):
         title = "微型臺指平倉提醒"
 
     reasons = signal.get("reasons") or []
     reason_text = "\n".join(f"{idx + 1}. {item}" for idx, item in enumerate(reasons[:3])) or "無明確原因"
+    candidate = dict(signal.get("formal_candidate") or {})
+    candidate_text = ""
+    if event_type.startswith("ENTRY"):
+        checks = candidate.get("passed") or []
+        check_text = "\n".join(f"[通過] {item}" for item in checks[:5]) or "[通過] 策略與風控條件通過"
+        candidate_text = (
+            "候選狀態：策略、量流、VWAP 與風控均已通過\n"
+            f"{check_text}\n"
+        )
+    test_text = "【測試訊息，不是真實進場訊號】\n" if signal.get("is_test") else ""
     body = (
         f"【{title}】\n"
+        f"{test_text}"
         f"事件：{event_type}\n"
         f"契約：{signal.get('contract_code') or '無資料'}\n"
         f"訊號時間：{signal.get('bar_time') or '無資料'}\n"
@@ -32,6 +46,7 @@ def format_signal_alert(signal, event_type="SIGNAL"):
         f"進場參考：{float(signal.get('entry_price') or 0):,.0f}\n"
         f"停損：{float(signal.get('stop_loss_price') or 0):,.0f}\n"
         f"停利：{float(signal.get('take_profit_price') or 0):,.0f}\n"
+        f"{candidate_text}"
         f"主要原因：\n{reason_text}\n"
         f"提醒性質：模擬策略，請自行確認後手動操作。"
     )
@@ -171,8 +186,22 @@ def format_whale_distribution_alert(event):
     tx_classified = float(event.get("tx_classification_ratio") or 0) * 100
     small_complete = float(event.get("small_completeness_ratio") or 0) * 100
     small_classified = float(event.get("small_classification_ratio") or 0) * 100
+    burst_window = int(event.get("burst_window_minutes") or 3)
+    burst_tx_ratio = float(event.get("burst_tx_delta_ratio") or 0) * 100
+    burst_small_ratio = float(event.get("burst_small_delta_ratio") or 0) * 100
+    burst_text = ""
+    if event.get("trigger_mode") and event.get("burst_tx_delta") is not None:
+        burst_text = (
+            f"觸發來源：{event.get('trigger_mode')}\n"
+            f"近 {burst_window} 分鐘大台 Delta："
+            f"{float(event.get('burst_tx_delta') or 0):+,.0f} 口／{burst_tx_ratio:+.1f}%\n"
+            f"近 {burst_window} 分鐘小型商品 Delta："
+            f"{float(event.get('burst_small_delta') or 0):+,.0f} 口／{burst_small_ratio:+.1f}%\n"
+        )
+    observation_text = format_direction_observation(event.get("direction_observation"))
     body = (
         f"【疑似大戶倒貨｜{level_text}警報】\n"
+        f"{burst_text}"
         f"大台累積 Delta：{delta_text}（{float(event.get('tx_delta') or 0):+,.0f} 口／{delta_ratio:+.1f}%）\n"
         f"小台主動賣量：連續 {int(event.get('small_sell_streak') or 0)} 分鐘大於買量\n"
         f"目前價格：{float(event.get('current_price') or 0):,.0f}\n"
@@ -185,6 +214,7 @@ def format_whale_distribution_alert(event):
         f"若再失守，可能依序回測 {float(targets[0]):,.0f}、{float(targets[1]):,.0f}。\n\n"
         f"判斷：{event.get('judgement') or '賣壓正在增加。'}\n"
         f"建議：{event.get('suggestion') or '停止追多，等待關鍵價位確認。'}\n\n"
+        f"{observation_text}\n\n"
         f"逐筆更新：{event.get('last_tick_at') or '--'}\n"
         "提醒性質：逐筆量流推估，不代表已確認特定大戶交易。"
     )

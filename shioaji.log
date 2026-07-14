@@ -51,3 +51,8 @@
 [pid:57224] 2026-07-13T00:31:04.843422Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed
 [pid:57224] 2026-07-13T01:00:54.311122Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed
 [pid:48044] 2026-07-13T01:00:54.427556Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed
+[pid:57224] 2026-07-13T14:28:03.496909Z  INFO shioaji::api::session: Received 401, proactively disconnecting Solace session to align with canonical shioaji
+[pid:57224] 2026-07-13T15:01:51.486276Z  INFO shioaji::api::token_pool: Removed invalid token from slot 2
+[pid:57224] 2026-07-13T15:01:51.486555Z  INFO shioaji::api::token_pool: Successfully invalidated token slot 2 via temporary runtime
+[pid:63520] 2026-07-14T00:00:59.495595Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed
+[pid:63520] 2026-07-14T00:31:16.109542Z ERROR rsolace::solclient: send msg to channel error: ReceiveClosed

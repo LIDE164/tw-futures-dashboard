@@ -1,5 +1,7 @@
 import pandas as pd
 
+from preopen_learning import calibrate_with_actual_forecasts
+
 
 SESSION_LABELS = {
     "day": ("日盤", "08:45"),
@@ -49,6 +51,31 @@ def _prepare_15m_bars(bars):
     return indexed.reset_index()
 
 
+def _daily_snapshot(bars, current_price):
+    frame = _prepare_15m_bars(bars)
+    if frame.empty:
+        return {"previous_close": 0.0, "change": 0.0, "change_pct": 0.0, "daily_volume": []}
+    daily = (
+        frame.set_index("ts")
+        .resample("1D")
+        .agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"})
+        .dropna()
+    )
+    if daily.empty:
+        return {"previous_close": 0.0, "change": 0.0, "change_pct": 0.0, "daily_volume": []}
+    previous_close = float(daily["Close"].iloc[-2]) if len(daily) >= 2 else float(daily["Close"].iloc[-1])
+    change = float(current_price or daily["Close"].iloc[-1]) - previous_close
+    return {
+        "previous_close": previous_close,
+        "change": change,
+        "change_pct": change / previous_close * 100 if previous_close else 0.0,
+        "daily_volume": [
+            {"date": index.strftime("%m/%d"), "volume": int(row["Volume"])}
+            for index, row in daily.tail(5).iterrows()
+        ],
+    }
+
+
 def _feature_at(frame, index):
     if index < 20:
         return None
@@ -83,22 +110,27 @@ def _session_records(frame, session):
         return records
     frame = frame.copy().reset_index(drop=True)
     dates = sorted(frame["ts"].dt.normalize().unique())
+    latest_timestamp = frame["ts"].max()
     for raw_date in dates:
         date = pd.Timestamp(raw_date)
         if session == "day":
-            cutoff_start = date + pd.Timedelta(hours=4, minutes=30)
-            cutoff_end = date + pd.Timedelta(hours=5, minutes=1)
             outcome_start = date + pd.Timedelta(hours=8, minutes=45)
             outcome_end = date + pd.Timedelta(hours=13, minutes=46)
         else:
-            cutoff_start = date + pd.Timedelta(hours=13, minutes=15)
-            cutoff_end = date + pd.Timedelta(hours=13, minutes=46)
             outcome_start = date + pd.Timedelta(hours=15)
             outcome_end = date + pd.Timedelta(days=1, hours=5, minutes=1)
 
-        cutoff_rows = frame[(frame["ts"] >= cutoff_start) & (frame["ts"] < cutoff_end)]
+        # Use the last completed bar known before the session opens. This keeps
+        # Monday day sessions learnable even though there is no Sunday night
+        # session, while still preventing any opening-session bar from leaking
+        # into the feature vector.
+        cutoff_rows = frame[
+            (frame["ts"] < outcome_start)
+            & (frame["ts"] >= outcome_start - pd.Timedelta(days=5))
+        ]
         outcome = frame[(frame["ts"] >= outcome_start) & (frame["ts"] < outcome_end)]
-        if cutoff_rows.empty or len(outcome) < 4:
+        session_complete_at = outcome_end - pd.Timedelta(minutes=15)
+        if latest_timestamp < session_complete_at or cutoff_rows.empty or len(outcome) < 4:
             continue
         cutoff_index = int(cutoff_rows.index[-1])
         feature = _feature_at(frame, cutoff_index)
@@ -146,9 +178,10 @@ def _weighted_probabilities(neighbours):
     return rounded
 
 
-def _walk_forward_accuracy(records):
+def _walk_forward_diagnostics(records):
     hits = 0
     tests = 0
+    predictions = []
     for index in range(12, len(records)):
         target = records[index]
         prior = []
@@ -157,10 +190,43 @@ def _walk_forward_accuracy(records):
         neighbours = sorted(prior, key=lambda item: item["distance"])[: min(12, len(prior))]
         if not neighbours:
             continue
-        predicted = max(_weighted_probabilities(neighbours), key=_weighted_probabilities(neighbours).get)
+        probabilities = _weighted_probabilities(neighbours)
+        predicted = max(probabilities, key=probabilities.get)
         hits += int(predicted == target["outcome"])
         tests += 1
-    return round(hits / tests * 100, 1) if tests else 0.0, tests
+        predictions.append(
+            {"date": target["date"], "predicted": predicted, "actual": target["outcome"]}
+        )
+    precision = {}
+    for name in ("bull", "range", "bear"):
+        selected = [item for item in predictions if item["predicted"] == name]
+        precision[name] = round(
+            sum(item["actual"] == name for item in selected) / len(selected) * 100, 1
+        ) if selected else None
+    return {
+        "accuracy": round(hits / tests * 100, 1) if tests else 0.0,
+        "tests": tests,
+        "precision": precision,
+        "last": predictions[-1] if predictions else None,
+    }
+
+
+def _calibrate_walk_forward(probabilities, diagnostics):
+    if not diagnostics.get("tests"):
+        return probabilities
+    weighted = {}
+    for name in ("bull", "range", "bear"):
+        precision = diagnostics.get("precision", {}).get(name)
+        reliability = 0.5 if precision is None else max(0.2, min(0.8, precision / 100))
+        weighted[name] = float(probabilities.get(name, 0)) * (0.6 + reliability)
+    last = diagnostics.get("last") or {}
+    if last.get("predicted") != last.get("actual") and last.get("predicted") in weighted:
+        weighted[last["predicted"]] *= 0.86
+    total = sum(weighted.values()) or 1.0
+    raw = {name: value / total * 100 for name, value in weighted.items()}
+    rounded = {name: int(round(value)) for name, value in raw.items()}
+    rounded[max(raw, key=raw.get)] += 100 - sum(rounded.values())
+    return rounded
 
 
 def build_scenario_model(bars, session, score=50):
@@ -194,24 +260,30 @@ def build_scenario_model(bars, session, score=50):
     ranked = [{**item, "distance": _distance(current, item)} for item in records]
     neighbour_count = min(24, max(10, int(len(records) ** 0.5 * 3)))
     neighbours = sorted(ranked, key=lambda item: item["distance"])[:neighbour_count]
-    probabilities = _weighted_probabilities(neighbours)
-    accuracy, tests = _walk_forward_accuracy(records)
+    raw_probabilities = _weighted_probabilities(neighbours)
+    diagnostics = _walk_forward_diagnostics(records)
+    probabilities = _calibrate_walk_forward(raw_probabilities, diagnostics)
     typical_up = pd.Series([max(0.0, item["up_move"]) for item in neighbours]).median()
     typical_down = pd.Series([max(0.0, item["down_move"]) for item in neighbours]).median()
     typical_range = pd.Series([abs(item["close_move"]) for item in neighbours]).median()
-    confidence = "高" if len(records) >= 45 and tests >= 25 and accuracy >= 50 else "中" if len(records) >= 20 else "低"
-    return {
-        "method": "15分K歷史相似日 KNN（每次盤前重算）",
+    confidence = "高" if len(records) >= 45 and diagnostics["tests"] >= 25 and diagnostics["accuracy"] >= 50 else "中" if len(records) >= 20 else "低"
+    model = {
+        "method": "15分K相似日 KNN＋失準校準",
         "sample_size": len(records),
         "neighbour_count": neighbour_count,
-        "walk_forward_accuracy": accuracy,
-        "walk_forward_tests": tests,
+        "walk_forward_accuracy": diagnostics["accuracy"],
+        "walk_forward_tests": diagnostics["tests"],
+        "walk_forward_precision": diagnostics["precision"],
+        "last_walk_forward_result": diagnostics["last"],
         "confidence": confidence,
+        "raw_probabilities": raw_probabilities,
         "probabilities": probabilities,
+        "decision_threshold": round(max(15.0, current.get("atr", 0) * 0.35), 1),
         "typical_up_move": round(float(typical_up or 0), 0),
         "typical_down_move": round(float(typical_down or 0), 0),
         "typical_range": round(float(typical_range or 0), 0),
     }
+    return calibrate_with_actual_forecasts(model)
 
 
 def build_preopen_briefing(
@@ -273,7 +345,10 @@ def build_preopen_briefing(
     pc_ratio = public_data.get("pc_ratio", {})
     option_levels = public_data.get("option_levels", {})
     institutional = public_data.get("txf_institutional", {})
+    large_trader = public_data.get("large_trader", {})
+    international = public_data.get("international", {})
     scenario_model = build_scenario_model(bars, session, score=score)
+    daily_snapshot = _daily_snapshot(bars, price)
 
     return {
         "session": session,
@@ -289,6 +364,10 @@ def build_preopen_briefing(
         "bid_volume": int(_number(realtime.get("bid_volume"))),
         "ask_volume": int(_number(realtime.get("ask_volume"))),
         "total_volume": int(_number(realtime.get("volume"))),
+        "previous_close": daily_snapshot["previous_close"],
+        "price_change": daily_snapshot["change"],
+        "price_change_pct": daily_snapshot["change_pct"],
+        "daily_volume_history": daily_snapshot["daily_volume"],
         "score": int(score),
         "label": label,
         "action": action,
@@ -319,6 +398,17 @@ def build_preopen_briefing(
         "investment_trust_oi": institutional.get("投信"),
         "dealer_oi": institutional.get("自營商"),
         "institutional_date": institutional.get("date"),
+        "institutional_total_oi": institutional.get("合計"),
+        "large_trader_long_oi": large_trader.get("long_oi"),
+        "large_trader_short_oi": large_trader.get("short_oi"),
+        "large_trader_net_oi": large_trader.get("net_oi"),
+        "large_trader_market_oi": large_trader.get("market_oi"),
+        "large_trader_date": large_trader.get("date"),
+        "large_trader_scope": large_trader.get("scope"),
+        "international_markets": list(international.get("items") or []),
+        "sox_history": list(international.get("sox_history") or []),
+        "international_source": international.get("source"),
+        "public_history": list(public_data.get("history") or []),
         "scenario_model": scenario_model,
         "public_errors": list(public_data.get("errors") or []),
     }

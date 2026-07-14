@@ -141,12 +141,32 @@ def _resample_kbars(df, rule="15min"):
         df.set_index("ts")
         .resample(rule)
         .agg(aggregation)
-        .dropna()
+        # Flow columns are intentionally sparse before the local Tick archive
+        # began. Keep valid OHLCV bars so add_flow_cost_features can use the
+        # causal K-bar proxy there, and true Tick flow only where complete.
+        .dropna(subset=["Open", "High", "Low", "Close", "Volume"])
         .reset_index()
     )
     resampled.attrs.update(df.attrs)
     resampled.attrs["signal_timeframe"] = rule
+    if str(rule).lower() in {"5min", "15min"} and "ts" in resampled.columns:
+        minutes = resampled["ts"].dt.hour * 60 + resampled["ts"].dt.minute
+        # TAIFEX final prints at 13:45 and 05:00 form one-minute buckets, not a
+        # completed 5/15-minute decision bar.
+        resampled = resampled[~minutes.isin({13 * 60 + 45, 5 * 60})].reset_index(drop=True)
     return resampled
+
+
+def _trading_session_key(value):
+    ts = pd.Timestamp(value)
+    minutes = ts.hour * 60 + ts.minute
+    if 8 * 60 + 45 <= minutes < 13 * 60 + 45:
+        return f"{ts.date().isoformat()}:day"
+    if minutes >= 15 * 60:
+        return f"{ts.date().isoformat()}:night"
+    if minutes < 5 * 60:
+        return f"{(ts - pd.Timedelta(days=1)).date().isoformat()}:night"
+    return f"{ts.date().isoformat()}:closed"
 
 
 def _entry_plan(action, fill_reference, stop_loss_points, take_profit_points, slippage_points):
@@ -337,6 +357,7 @@ def run_backtest(
     max_cost_distance_atr=1.2,
     require_cost_slope=True,
     min_flow_close_location=0.0,
+    force_flat_at_session_end=False,
 ):
     if df is None or df.empty or len(df) < 60:
         return pd.DataFrame(), pd.DataFrame(), {"error": "K 線資料不足，至少需要 60 根以上資料。"}
@@ -370,6 +391,11 @@ def run_backtest(
 
     for i in range(60, len(df) - 1):
         bar = df.iloc[i]
+        session_boundary = bool(
+            force_flat_at_session_end
+            and "ts" in df.columns
+            and _trading_session_key(df["ts"].iloc[i]) != _trading_session_key(df["ts"].iloc[i + 1])
+        )
         exit_action, exit_price, exit_note = _check_bar_exit(broker, bar)
         filled_by_bar = False
         fill_message = ""
@@ -382,6 +408,19 @@ def run_backtest(
                 cooldown_until_bar = max(cooldown_until_bar, i + int(cooldown_bars))
         elif broker.position != 0:
             _maybe_apply_breakeven_stop(broker, bar, breakeven_trigger_r, breakeven_buffer_points)
+
+        if session_boundary and broker.position != 0 and not filled_by_bar:
+            close_action = "CLOSE_LONG" if broker.position > 0 else "CLOSE_SHORT"
+            filled_by_bar, fill_message = broker.execute(
+                close_action,
+                float(bar["Close"]),
+                quantity=abs(broker.position),
+                note="交易時段結束，盤中策略強制平倉",
+            )
+            if filled_by_bar:
+                setattr(broker.trades[-1], "bar", i)
+                strategy.reset()
+                cooldown_until_bar = max(cooldown_until_bar, i + int(cooldown_bars))
 
         history_start = max(0, i + 1 - INDICATOR_LOOKBACK_BARS)
         history = df.iloc[history_start : i + 1].copy()
@@ -462,6 +501,9 @@ def run_backtest(
         elif action == "SELL_SHORT" and not allow_short:
             action = "HOLD"
             message = "目前設定停用空單，跳過做空訊號。"
+        elif session_boundary and action in {"BUY_LONG", "SELL_SHORT"}:
+            action = "HOLD"
+            message = "交易時段即將結束，盤中策略不建立新部位。"
 
         if action in {"BUY_LONG", "SELL_SHORT"} and require_5m_confirmation:
             confirmation = evaluate_5m_confirmation(

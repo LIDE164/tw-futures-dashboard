@@ -16,6 +16,7 @@ from alert_manager import (
 )
 from briefing_image import render_preopen_briefing_image
 from daily_research import format_close_research_report, run_close_research
+from direction_observation import build_direction_observation, evaluate_formal_candidate
 from entry_confirmation import evaluate_5m_confirmation
 from historical_data import (
     get_history_status,
@@ -31,6 +32,7 @@ from market_data import get_public_market_data
 from market_session import TAIPEI, get_market_status
 from paper_broker import PaperBroker
 from preopen_briefing import build_preopen_briefing, format_preopen_briefing
+from preopen_learning import evaluate_pending_forecasts, record_preopen_forecast
 from risk_manager import evaluate_entry_risk, evaluate_signal_quality
 from scoring import get_decision_score
 from storage import (
@@ -306,7 +308,7 @@ def _preopen_session(now, args):
     night_send = int(args.night_preopen_hour) * 60 + int(args.night_preopen_minute)
     if day_send <= current_minutes < 8 * 60 + 45:
         return "day"
-    if night_send <= current_minutes < 15 * 60:
+    if args.night_preopen_briefing and night_send <= current_minutes < 15 * 60:
         return "night"
     return ""
 
@@ -409,6 +411,7 @@ def _maybe_send_preopen_briefing(
         min_volume_ratio=args.min_volume_ratio,
         max_chase_atr=args.max_chase_atr,
     )
+    evaluate_pending_forecasts(bars, now=now)
     public_data = get_public_market_data()
     briefing = build_preopen_briefing(
         session=session,
@@ -437,6 +440,7 @@ def _maybe_send_preopen_briefing(
     except Exception as exc:
         print(f"preopen image fallback to text: {exc}")
     _, delivery = dispatch_preopen_briefing(briefing, body, image_path=image_path)
+    record_preopen_forecast(briefing)
     state.update(
         {
             "last_session_key": session_key,
@@ -628,12 +632,12 @@ def _build_test_signal(action, args):
             reasons = ["test signal: short stop reached", "telegram delivery check"]
     elif action == "BUY_LONG":
         event_type = "ENTRY_LONG"
-        message = "test long entry"
-        reasons = ["test signal: long entry", "telegram delivery check"]
+        message = "test formal long candidate"
+        reasons = ["測試：15／60 分趨勢同步偏多", "測試：買方量流與 VWAP 確認", "Telegram 傳送檢查"]
     elif action == "SELL_SHORT":
         event_type = "ENTRY_SHORT"
-        message = "test short entry"
-        reasons = ["test signal: short entry", "telegram delivery check"]
+        message = "test formal short candidate"
+        reasons = ["測試：15／60 分趨勢同步偏空", "測試：賣方量流與 VWAP 確認", "Telegram 傳送檢查"]
     else:
         raise ValueError(f"unsupported test signal action: {action}")
 
@@ -651,6 +655,12 @@ def _build_test_signal(action, args):
         "take_profit_price": take_price,
         "reasons": reasons,
         "message": message,
+        "is_test": True,
+        "formal_candidate": {
+            "allowed": True,
+            "passed": ["15／60 分趨勢同向", "量流資料品質通過", "價格與 VWAP 同向", "風險條件通過"],
+            "blocked": [],
+        },
     }
     return signal, event_type
 
@@ -690,6 +700,10 @@ def _setup_whale_monitor(api, args):
         level1_min_tx_volume=args.whale_level1_min_tx_volume,
         min_completeness_ratio=args.whale_min_completeness,
         min_classification_ratio=args.whale_min_classification,
+        burst_window_minutes=args.whale_burst_window,
+        burst_delta_ratio_threshold=args.whale_burst_delta_ratio,
+        burst_small_delta_ratio_threshold=args.whale_burst_small_delta_ratio,
+        burst_min_tx_volume=args.whale_burst_min_tx_volume,
     )
     monitor.restore_state(load_json_state(WHALE_FLOW_STATE_KEY, {}))
     subscription = sinopac_api.subscribe_futures_order_flow(
@@ -731,6 +745,12 @@ def _maybe_send_whale_distribution(args, market_status, realtime, bars, tech_dat
         if persist:
             save_json_state(WHALE_FLOW_STATE_KEY, monitor.export_state())
         return None
+    event["direction_observation"] = build_direction_observation(
+        tech_data,
+        flow,
+        current_price=live_realtime.get("current_price"),
+        session_vwap=flow.get("session_vwap"),
+    )
     if not monitor.transition_level(event.get("level"), now):
         if persist:
             save_json_state(WHALE_FLOW_STATE_KEY, monitor.export_state())
@@ -856,6 +876,19 @@ def evaluate_once(api, args):
             broker.take_profit_price,
         )
     action, message = strategy.decide_action(score, current_price)
+    monitor = getattr(args, "_whale_monitor", None)
+    flow_snapshot = (
+        monitor.snapshot(datetime.now(TAIPEI).replace(tzinfo=None))
+        if monitor is not None
+        else {}
+    )
+    direction_observation = build_direction_observation(
+        tech_data,
+        flow_snapshot,
+        current_price=current_price,
+        session_vwap=flow_snapshot.get("session_vwap"),
+    )
+    formal_candidate = None
     holding_bars = _bars_since(bars, worker_state.get("entry_bar_time"))
     if (
         broker.position > 0
@@ -1035,6 +1068,30 @@ def evaluate_once(api, args):
             )
             return None
 
+        formal_candidate = evaluate_formal_candidate(
+            action,
+            tech_data,
+            flow_snapshot,
+            current_price=current_price,
+            session_vwap=flow_snapshot.get("session_vwap"),
+        )
+        if not formal_candidate["allowed"]:
+            _update_worker_heartbeat(
+                "ok",
+                _heartbeat_detail(
+                    market_status,
+                    realtime,
+                    bars,
+                    score,
+                    label,
+                    action,
+                    f"formal candidate blocked: {' / '.join(formal_candidate['blocked'])}",
+                ),
+            )
+            return None
+        reasons = list(reasons or [])
+        reasons.extend(formal_candidate["passed"][:3])
+
     if action == "HOLD":
         _update_worker_heartbeat("ok", _heartbeat_detail(market_status, realtime, bars, score, label, action, message))
         return None
@@ -1066,7 +1123,10 @@ def evaluate_once(api, args):
         "take_profit_price": take_price,
         "reasons": reasons,
         "message": message,
+        "direction_observation": direction_observation,
     }
+    if formal_candidate is not None:
+        signal["formal_candidate"] = formal_candidate
     save_signal(signal)
     sent, detail = dispatch_alert(signal, event_type)
     tracking_detail = ""
@@ -1181,6 +1241,7 @@ def parse_args():
     parser.add_argument("--min-oos-trades", type=int, default=30)
     parser.add_argument("--adaptive-learning", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--preopen-briefing", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--night-preopen-briefing", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--hourly-report", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--day-preopen-hour", type=int, default=8)
     parser.add_argument("--day-preopen-minute", type=int, default=35)
@@ -1204,6 +1265,10 @@ def parse_args():
     parser.add_argument("--whale-level1-min-tx-volume", type=int, default=50)
     parser.add_argument("--whale-min-completeness", type=float, default=0.95)
     parser.add_argument("--whale-min-classification", type=float, default=0.80)
+    parser.add_argument("--whale-burst-window", type=int, default=3)
+    parser.add_argument("--whale-burst-delta-ratio", type=float, default=-0.12)
+    parser.add_argument("--whale-burst-small-delta-ratio", type=float, default=-0.08)
+    parser.add_argument("--whale-burst-min-tx-volume", type=float, default=300)
     parser.add_argument("--test-whale-alert", action="store_true", help="Send a synthetic whale-distribution alert")
     parser.add_argument("--test-whale-level", type=int, choices=(1, 2, 3), default=2)
     parser.add_argument("--test-signal", choices=sorted(TEST_SIGNAL_ACTIONS), help="Send a test strategy alert")
